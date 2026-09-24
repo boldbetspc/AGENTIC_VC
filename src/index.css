@@ -1,0 +1,249 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
+
+    --card: 0 0% 8%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 0 0% 6%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 280 80% 65%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 190 80% 65%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 65%;
+
+    --accent: 280 80% 65%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 18%;
+    --input: 0 0% 18%;
+    --ring: 280 80% 65%;
+
+    --radius: 1rem;
+
+    /* RunBot gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(280 80% 65%) 0%, hsl(190 80% 65%) 100%);
+    --gradient-secondary: linear-gradient(180deg, hsl(280 80% 65% / 0.1) 0%, transparent 100%);
+    --glow-primary: 0 0 40px hsl(280 80% 65% / 0.3);
+    --glow-secondary: 0 0 40px hsl(190 80% 65% / 0.3);
+    
+    /* Animation */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Pitch Us — agent theater */
+@layer utilities {
+  .font-pitch-display {
+    font-family: "Syne", ui-sans-serif, system-ui, sans-serif;
+  }
+  .font-pitch-serif {
+    font-family: "Instrument Serif", ui-serif, Georgia, serif;
+  }
+}
+
+/* Scoped palette for the AI First Look experience: deep blue-black canvas,
+   ultraviolet → electric mint signal colors. Overrides tokens locally so the
+   rest of the site keeps the global theme. */
+.pitch-theme {
+  --background: 0 0% 0%;
+  --foreground: 210 20% 98%;
+  --card: 220 14% 7%;
+  --card-foreground: 210 20% 98%;
+  --popover: 220 14% 6%;
+  --popover-foreground: 210 20% 98%;
+  --primary: 192 92% 64%;
+  --primary-foreground: 210 40% 8%;
+  --secondary: 214 80% 72%;
+  --secondary-foreground: 210 40% 8%;
+  --accent: 192 92% 64%;
+  --accent-foreground: 210 40% 8%;
+  --muted: 220 10% 12%;
+  --muted-foreground: 214 18% 78%;
+  --border: 214 14% 22%;
+  --input: 214 14% 22%;
+  --ring: 192 92% 64%;
+  --gradient-primary: linear-gradient(135deg, hsl(192 95% 58%) 0%, hsl(214 90% 66%) 100%);
+  --glow-primary: 0 0 36px hsl(192 95% 58% / 0.28);
+  --glow-secondary: 0 0 36px hsl(214 90% 66% / 0.22);
+  color: hsl(var(--foreground));
+  background-color: #000;
+}
+
+.pitch-theme.font-pitch-display,
+.pitch-theme .font-pitch-display,
+.pitch-theme .font-pitch-serif {
+  font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  font-style: normal;
+}
+
+.pitch-theme .font-pitch-display {
+  letter-spacing: 0.08em;
+}
+
+.pitch-theme .pitch-line {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid hsl(0 0% 100% / 0.18);
+  border-radius: 0;
+  background: transparent;
+  padding: 0.7rem 0 0.55rem;
+  font-size: 1.05rem;
+  color: white;
+}
+
+.pitch-theme .pitch-line:focus {
+  outline: none;
+  border-bottom-color: hsl(192 92% 64%);
+  box-shadow: none;
+}
+
+.pitch-theme .pitch-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  border-bottom: 1px solid hsl(0 0% 100% / 0.08);
+  padding: 0.95rem 0;
+}
+
+.pitch-theme .pitch-row:hover .pitch-row-action {
+  color: hsl(192 92% 70%);
+}
+
+.pitch-theme .pitch-launch {
+  height: 2.75rem;
+  width: 100%;
+  border-radius: 999px;
+  background: hsl(192 92% 62%) !important;
+  color: hsl(210 40% 6%) !important;
+  font-weight: 650;
+  box-shadow: none;
+}
+
+@media (min-width: 1024px) {
+  .pitch-theme .pitch-launch {
+    width: 12.5rem;
+  }
+}
+
+.pitch-theme .pitch-intake,
+.pitch-theme .pitch-intake .font-pitch-display,
+.pitch-theme .pitch-intake .font-pitch-serif {
+  letter-spacing: 0;
+  font-style: normal;
+}
+
+.pitch-theme input,
+.pitch-theme textarea {
+  color: hsl(210 20% 98%);
+}
+
+.pitch-theme input::placeholder,
+.pitch-theme textarea::placeholder {
+  color: hsl(214 12% 62%);
+}
+
+/* Feedback result only — the live review room keeps its own treatment. */
+.pitch-theme .pitch-result-card {
+  margin-top: 1.5rem;
+  border-radius: 1.25rem;
+  border: 1px solid hsl(214 18% 22%);
+  background: linear-gradient(180deg, hsl(220 18% 9%) 0%, hsl(220 16% 5%) 100%);
+  padding: 1.5rem 1.35rem 1.4rem;
+  box-shadow: 0 16px 48px hsl(0 0% 0% / 0.4);
+}
+
+.pitch-theme .pitch-result-kicker {
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: hsl(192 92% 74%);
+}
+
+.pitch-theme .pitch-result-body {
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: hsl(210 20% 96%);
+}
+
+@keyframes agent-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes agent-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+@keyframes agent-scan {
+  0% { transform: translateY(-100%); opacity: 0; }
+  20% { opacity: 0.4; }
+  100% { transform: translateY(100%); opacity: 0; }
+}
+@keyframes thought-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(4px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+@keyframes verdict-slam {
+  0% { opacity: 0; transform: scale(0.7) translateY(20px); filter: blur(12px); }
+  60% { opacity: 1; transform: scale(1.04) translateY(0); filter: blur(0); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes pipeline-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.45); }
+  50% { box-shadow: 0 0 0 10px hsl(var(--primary) / 0); }
+}
+
+@keyframes scan-sweep {
+  0% { top: -18%; opacity: 0; }
+  12% { opacity: 0.55; }
+  88% { opacity: 0.55; }
+  100% { top: 118%; opacity: 0; }
+}
+@keyframes gradient-x {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes orb-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(36px, -24px) scale(1.12); }
+  66% { transform: translate(-24px, 18px) scale(0.94); }
+}
+
+.animate-agent-orbit { animation: agent-orbit 18s linear infinite; }
+.animate-agent-orbit-fast { animation: agent-orbit 2.6s linear infinite; }
+.animate-agent-breathe { animation: agent-breathe 3.2s ease-in-out infinite; }
+.animate-thought-in { animation: thought-in 0.45s ease-out both; }
+.animate-verdict-slam { animation: verdict-slam 0.85s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-pipeline-pulse { animation: pipeline-pulse 1.6s ease-out infinite; }
+.animate-scan-sweep { animation: scan-sweep 3.4s ease-in-out infinite; }
+.animate-gradient-x { background-size: 200% 200%; animation: gradient-x 6s ease infinite; }
+.animate-orb-drift { animation: orb-drift 16s ease-in-out infinite; }
+.animate-orb-drift-slow { animation: orb-drift 26s ease-in-out infinite reverse; }
