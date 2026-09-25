@@ -161,7 +161,8 @@ All colors MUST be HSL.
 }
 
 .pitch-theme input,
-.pitch-theme textarea {
+.pitch-theme textarea,
+.pitch-theme select {
   color: hsl(210 20% 98%);
 }
 

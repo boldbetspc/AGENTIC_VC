@@ -4,6 +4,9 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { go } from "@/lib/nav";
+import { STAGES, THEMES } from "@/lib/pitch-fields";
+import SuperLeagueInvite from "@/components/SuperLeagueInvite";
 
 const DISCLAIMER =
   "This AI review is for founders' educational purposes only. It does not represent any investment advice and there is no investment proposal. No offer to invest is being made and there is no solicitation made. Also there is no commitment to capital made.";
@@ -1029,6 +1032,9 @@ const PitchUs = () => {
   const [founderName, setFounderName] = useState("");
   const [founderEmail, setFounderEmail] = useState("");
   const [companyName, setCompanyName] = useState("");
+  const [country, setCountry] = useState("");
+  const [theme, setTheme] = useState("");
+  const [stage, setStage] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -1206,10 +1212,10 @@ const PitchUs = () => {
       });
       return;
     }
-    if (!founderName.trim() || !founderEmail.trim() || !companyName.trim()) {
+    if (!founderName.trim() || !founderEmail.trim() || !companyName.trim() || !country.trim() || !theme || !stage) {
       toast({
         title: "Details missing",
-        description: "Add your name, email, and company.",
+        description: "Add your name, email, company, country, theme, and stage.",
         variant: "destructive",
       });
       return;
@@ -1275,7 +1281,16 @@ const PitchUs = () => {
       const sources = [file, explainerFile, liveTranscript.trim(), videoUrl.trim(), websiteUrl.trim()].filter(Boolean).length;
       if (sources > 1) materialType = "mixed";
 
+      const stageLabel = STAGES.find((s) => s.value === stage)?.label || stage;
+      const founderContext = [
+        "FOUNDER CONTEXT",
+        `Location: ${country.trim()}`,
+        `Theme: ${theme}`,
+        `Stage: ${stageLabel}`,
+      ].join("\n");
+
       const liveNote = [
+        founderContext,
         liveTranscript.trim()
           ? `FOUNDER LIVE PITCH (speech-to-text from a camera recording, max 3 minutes):\n${liveTranscript.trim()}`
           : "",
@@ -1286,7 +1301,7 @@ const PitchUs = () => {
         p_founder_name: founderName.trim(),
         p_founder_email: founderEmail.trim(),
         p_company_name: companyName.trim(),
-        p_one_liner: "",
+        p_one_liner: `${theme} · ${stageLabel} · ${country.trim()}`,
         p_pitch_narrative: liveNote,
         p_website_url: websiteUrl.trim() || null,
         p_video_url: videoUrl.trim() || null,
@@ -1395,6 +1410,9 @@ const PitchUs = () => {
                     : "Tell us who you are. Then hand the agent one source, or several."}
                 </p>
               </div>
+              <button type="button" onClick={() => go("/super-league")} className="text-sm text-white/50 hover:text-white">
+                Super League
+              </button>
             </header>
 
             <div className="grid items-start gap-12 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
@@ -1411,6 +1429,40 @@ const PitchUs = () => {
                 <label className="block">
                   <span className="sr-only">Email</span>
                   <input type="email" className={fieldClass} value={founderEmail} onChange={(e) => setFounderEmail(e.target.value)} placeholder="Email" required />
+                </label>
+                <label className="block">
+                  <span className="sr-only">Country</span>
+                  <input className={fieldClass} value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" required />
+                </label>
+                <label className="relative block">
+                  <span className="sr-only">Theme</span>
+                  <select
+                    className={cn(fieldClass, "appearance-none pr-6", !theme && "text-white/35")}
+                    value={theme}
+                    onChange={(e) => setTheme(e.target.value)}
+                    required
+                  >
+                    <option value="" disabled>Theme</option>
+                    {THEMES.map((item) => (
+                      <option key={item} value={item} className="bg-black text-white">{item}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
+                </label>
+                <label className="relative block">
+                  <span className="sr-only">Stage</span>
+                  <select
+                    className={cn(fieldClass, "appearance-none pr-6", !stage && "text-white/35")}
+                    value={stage}
+                    onChange={(e) => setStage(e.target.value)}
+                    required
+                  >
+                    <option value="" disabled>Stage</option>
+                    {STAGES.map((item) => (
+                      <option key={item.value} value={item.value} className="bg-black text-white">{item.label}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
                 </label>
               </section>
 
@@ -1502,9 +1554,10 @@ const PitchUs = () => {
                 {companyName.trim() || "Session"}
               </h2>
               <p className="mt-3 max-w-xl text-sm text-white/45">
-                {liveTranscript.trim()
-                  ? "Deck + live pitch"
-                  : websiteUrl.trim() || (file ? file.name : videoUrl.trim()) || "Educational review in progress"}
+                {[theme, STAGES.find((s) => s.value === stage)?.label, country.trim()].filter(Boolean).join(" · ") ||
+                  (liveTranscript.trim()
+                    ? "Deck + live pitch"
+                    : websiteUrl.trim() || (file ? file.name : videoUrl.trim()) || "Educational review in progress")}
               </p>
             </header>
             )}
@@ -1595,6 +1648,15 @@ const PitchUs = () => {
                     <EvidencePanel evidence={artifacts.evidence || []} />
                   </div>
                 </div>
+
+                <SuperLeagueInvite
+                  companyName={companyName}
+                  founderName={founderName}
+                  country={country}
+                  theme={theme}
+                  stage={stage}
+                  pitchId={pitchId}
+                />
 
                 <div className="mt-10 flex flex-col gap-4 border-t border-white/10 pt-6 lg:flex-row lg:items-center lg:justify-between">
                   <p className="max-w-xl text-sm text-white/45">

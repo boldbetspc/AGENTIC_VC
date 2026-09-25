@@ -260,6 +260,57 @@ export type Database = {
         }
         Relationships: []
       }
+      super_league: {
+        Row: {
+          advantage: string
+          city: string
+          company_key: string
+          company_name: string
+          country: string
+          created_at: string
+          founder_names: string
+          id: string
+          logo_url: string | null
+          pitch_id: string | null
+          revenue: string
+          stage: string
+          subtheme: string
+          theme: string
+        }
+        Insert: {
+          advantage: string
+          city: string
+          company_key: string
+          company_name: string
+          country: string
+          created_at?: string
+          founder_names: string
+          id?: string
+          logo_url?: string | null
+          pitch_id?: string | null
+          revenue: string
+          stage: string
+          subtheme: string
+          theme: string
+        }
+        Update: {
+          advantage?: string
+          city?: string
+          company_key?: string
+          company_name?: string
+          country?: string
+          created_at?: string
+          founder_names?: string
+          id?: string
+          logo_url?: string | null
+          pitch_id?: string | null
+          revenue?: string
+          stage?: string
+          subtheme?: string
+          theme?: string
+        }
+        Relationships: []
+      }
       site_content: {
         Row: {
           content_key: string
@@ -332,6 +383,26 @@ export type Database = {
     }
     Functions: {
       count_admins: { Args: never; Returns: number }
+      delete_super_league: {
+        Args: { p_id: string }
+        Returns: Json
+      }
+      join_super_league: {
+        Args: {
+          p_advantage: string
+          p_city: string
+          p_company_name: string
+          p_country: string
+          p_founder_names: string
+          p_logo_url?: string | null
+          p_pitch_id?: string | null
+          p_revenue: string
+          p_stage: string
+          p_subtheme: string
+          p_theme: string
+        }
+        Returns: Json
+      }
       get_pitch_status: {
         Args: { p_id: string; p_token: string }
         Returns: Json
