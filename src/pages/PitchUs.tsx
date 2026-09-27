@@ -805,12 +805,50 @@ function formatClock(total: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function useMicLevel(stream: MediaStream | null, active: boolean) {
+  const [level, setLevel] = useState(0);
+  useEffect(() => {
+    if (!stream || !active) {
+      setLevel(0);
+      return;
+    }
+    const ctx = new AudioContext();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+    let frame = 0;
+    const tick = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 1) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      setLevel(Math.min(1, Math.sqrt(sum / data.length) * 4));
+      frame = requestAnimationFrame(tick);
+    };
+    void ctx.resume().then(tick);
+    return () => {
+      cancelAnimationFrame(frame);
+      source.disconnect();
+      void ctx.close();
+    };
+  }, [stream, active]);
+  return level;
+}
+
 function LivePitchRecorder({
   transcript,
   onTranscript,
+  founderName,
+  companyName,
 }: {
   transcript: string;
   onTranscript: (text: string) => void;
+  founderName: string;
+  companyName: string;
 }) {
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -818,16 +856,22 @@ function LivePitchRecorder({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
-  const [open, setOpen] = useState(false);
-  const [recording, setRecording] = useState(false);
+  const startedRef = useRef(false);
+  const secondsRef = useRef(0);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [mode, setMode] = useState<"idle" | "countdown" | "recording" | "saving" | "error">("idle");
+  const [countdown, setCountdown] = useState<number | null>(null);
   const [seconds, setSeconds] = useState(0);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [takenSeconds, setTakenSeconds] = useState(0);
   const [blob, setBlob] = useState<Blob | null>(null);
-  const [transcribing, setTranscribing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const level = useMicLevel(stream, mode === "countdown");
 
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    setStream(null);
   };
 
   const stopTimer = () => {
@@ -841,45 +885,75 @@ function LivePitchRecorder({
   }, []);
 
   const openCamera = async () => {
-    setOpen(true);
-    if (streamRef.current) return;
+    if (streamRef.current) return streamRef.current;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const next = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: true,
       });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+      streamRef.current = next;
+      setStream(next);
+      return next;
     } catch {
       toast({
         title: "Camera unavailable",
         description: "Allow camera and microphone to record a live pitch.",
         variant: "destructive",
       });
+      setMode("idle");
+      return null;
+    }
+  };
+
+  const transcribe = async (next: Blob) => {
+    setMode("saving");
+    setError(null);
+    try {
+      const ext = next.type.includes("mp4") ? "mp4" : "webm";
+      const path = `${crypto.randomUUID()}.${ext}`;
+      const contentType = ext === "mp4" ? "video/mp4" : "video/webm";
+      const { error: uploadError } = await supabase.storage.from("pitch-materials").upload(path, next, {
+        contentType,
+        upsert: false,
+      });
+      if (uploadError) throw uploadError;
+      const { data, error: invokeError } = await supabase.functions.invoke("transcribe-live-pitch", {
+        body: { file_path: path, file_name: `live-pitch.${ext}`, file_mime: contentType },
+      });
+      if (invokeError) throw new Error(invokeError.message || "Transcription failed");
+      if (data?.error) throw new Error(String(data.error));
+      const text = String(data?.transcript || "").trim();
+      if (!text) throw new Error("No speech detected");
+      onTranscript(text);
+      setMode("idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Transcription failed";
+      setError(message);
+      setMode("error");
+      toast({ title: "Could not capture the words", description: message, variant: "destructive" });
     }
   };
 
   const finishRecording = () => {
+    if (startedRef.current === false && recorderRef.current == null) return;
     stopTimer();
+    setTakenSeconds(secondsRef.current);
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") rec.stop();
-    setRecording(false);
+    else setMode("saving");
   };
 
-  const startRecording = async () => {
-    if (!streamRef.current) await openCamera();
-    const stream = streamRef.current;
-    if (!stream) return;
+  const startRecording = () => {
+    const live = streamRef.current;
+    if (!live || startedRef.current) return;
+    startedRef.current = true;
     chunksRef.current = [];
     const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
       ? "video/webm;codecs=vp9,opus"
       : MediaRecorder.isTypeSupported("video/webm")
         ? "video/webm"
         : "";
-    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const rec = new MediaRecorder(live, mime ? { mimeType: mime } : undefined);
     recorderRef.current = rec;
     rec.ondataavailable = (e) => {
       if (e.data.size) chunksRef.current.push(e.data);
@@ -888,135 +962,157 @@ function LivePitchRecorder({
       const type = rec.mimeType || "video/webm";
       const next = new Blob(chunksRef.current, { type });
       setBlob(next);
-      setPreviewUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return URL.createObjectURL(next);
-      });
       stopStream();
       if (videoRef.current) videoRef.current.srcObject = null;
+      void transcribe(next);
     };
     rec.start(1000);
     setSeconds(0);
-    setRecording(true);
-    setBlob(null);
+    setMode("recording");
     onTranscript("");
     timerRef.current = window.setInterval(() => {
       setSeconds((n) => {
-        if (n + 1 >= LIVE_MAX_SEC) {
-          finishRecording();
-          return LIVE_MAX_SEC;
-        }
-        return n + 1;
+        const next = Math.min(LIVE_MAX_SEC, n + 1);
+        secondsRef.current = next;
+        if (next >= LIVE_MAX_SEC) finishRecording();
+        return next;
       });
     }, 1000);
   };
 
-  const transcribe = async () => {
-    if (!blob) return;
-    setTranscribing(true);
-    try {
-      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
-      const path = `${crypto.randomUUID()}.${ext}`;
-      const contentType = ext === "mp4" ? "video/mp4" : "video/webm";
-      const { error: uploadError } = await supabase.storage.from("pitch-materials").upload(path, blob, {
-        contentType,
-        upsert: false,
-      });
-      if (uploadError) throw uploadError;
-      const { data, error } = await supabase.functions.invoke("transcribe-live-pitch", {
-        body: { file_path: path, file_name: `live-pitch.${ext}`, file_mime: contentType },
-      });
-      if (error) throw new Error(error.message || "Transcription failed");
-      if (data?.error) throw new Error(String(data.error));
-      const text = String(data?.transcript || "").trim();
-      if (!text) throw new Error("No speech detected");
-      onTranscript(text);
-      toast({ title: "Live pitch captured", description: "Whisper turned your recording into the founder note." });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Transcription failed";
-      toast({ title: "Could not transcribe", description: message, variant: "destructive" });
-    } finally {
-      setTranscribing(false);
+  const begin = async () => {
+    startedRef.current = false;
+    setError(null);
+    setCountdown(null);
+    setMode("countdown");
+    const next = await openCamera();
+    if (!next) return;
+    setCountdown(3);
+    if (videoRef.current) {
+      videoRef.current.srcObject = next;
+      await videoRef.current.play().catch(() => undefined);
     }
   };
 
-  const discard = () => {
-    finishRecording();
+  const leave = () => {
+    stopTimer();
     stopStream();
-    setBlob(null);
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-    setSeconds(0);
-    onTranscript("");
-    if (videoRef.current) videoRef.current.srcObject = null;
+    startedRef.current = false;
+    setCountdown(null);
+    setMode(transcript ? "idle" : "idle");
   };
 
+  const redo = () => {
+    setBlob(null);
+    setSeconds(0);
+    setTakenSeconds(0);
+    setTranscriptOpen(false);
+    onTranscript("");
+    void begin();
+  };
+
+  useEffect(() => {
+    if (mode !== "countdown") return;
+    if (countdown === 0) {
+      startRecording();
+      return;
+    }
+    if (countdown == null) return;
+    const timer = window.setTimeout(() => setCountdown((n) => (n == null ? n : n - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [mode, countdown]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !stream || (mode !== "countdown" && mode !== "recording")) return;
+    video.srcObject = stream;
+    void video.play().catch(() => undefined);
+  }, [stream, mode]);
+
+  const ring = 492;
+  const warm = seconds >= LIVE_MAX_SEC - 20;
+  const onStage = mode !== "idle";
+
   return (
-    <div className={cn(transcript && "border-b border-primary/40")}>
+    <div>
       <div className="pitch-row">
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", transcript ? "bg-primary" : "bg-white/25")} />
         <span className="min-w-0 flex-1">
           <span className="block text-[15px] text-white">Live pitch</span>
-          <span className="block text-xs text-white/40">{transcript ? "Transcript ready" : "Camera, 3 minutes"}</span>
+          <span className="block text-xs text-white/40">{transcript ? formatClock(takenSeconds) : "Camera, 3 minutes"}</span>
         </span>
-        {!open && (
-          <button type="button" onClick={openCamera} className="pitch-row-action text-sm text-white/55">
-            {transcript ? "Redo" : "Record"}
-          </button>
-        )}
+        <button type="button" onClick={transcript ? redo : begin} className="pitch-row-action text-sm text-white/55">
+          {transcript ? "Redo" : "Record"}
+        </button>
       </div>
-
-      {open && (
-        <div className="p-4">
-          <div className={cn("relative overflow-hidden rounded-xl bg-black ring-1", recording ? "ring-red-500" : "ring-white/15")}>
-            {previewUrl && !recording ? (
-              <video src={previewUrl} controls className="aspect-video w-full bg-black object-cover" />
-            ) : (
-              <video ref={videoRef} muted playsInline className="aspect-video w-full -scale-x-100 bg-black object-cover" />
-            )}
-            <div className="pointer-events-none absolute left-3 top-3 rounded-full bg-black/70 px-3 py-1 text-sm font-semibold tabular-nums text-white">
-              {recording && <span className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />}
-              {formatClock(seconds)} / 3:00
-            </div>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            {!recording && !blob && (
-              <button type="button" onClick={startRecording} className="rounded-full bg-red-600 px-5 py-2.5 text-sm font-semibold text-white">
-                Record
-              </button>
-            )}
-            {recording && (
-              <button type="button" onClick={finishRecording} className="rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-black">
-                Stop
-              </button>
-            )}
-            {blob && !recording && (
-              <>
-                <button
-                  type="button"
-                  onClick={transcribe}
-                  disabled={transcribing}
-                  className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground disabled:opacity-60"
-                >
-                  {transcribing && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {transcribing ? "Transcribing…" : "Use this pitch"}
-                </button>
-                <button type="button" onClick={discard} className="rounded-full border border-white/20 px-4 py-2.5 text-sm text-foreground">
-                  Discard
-                </button>
-              </>
-            )}
-          </div>
-
-          {transcript && (
-            <div className="mt-4 rounded-lg border border-white/10 bg-black/40 p-3">
-              <p className="text-xs font-medium text-primary">Founder live pitch</p>
-              <p className="mt-1.5 max-h-40 overflow-y-auto text-sm leading-relaxed text-white/85">{transcript}</p>
-            </div>
+      {transcript && (
+        <div className="border-b border-white/10 pb-4">
+          <button type="button" onClick={() => setTranscriptOpen((open) => !open)} className="text-sm text-white/50 hover:text-white">
+            {transcriptOpen ? "Hide transcript" : "Transcript"}
+          </button>
+          {transcriptOpen && (
+            <p className="mt-3 text-sm leading-relaxed text-white/80">{transcript}</p>
           )}
+        </div>
+      )}
+
+      {onStage && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-black px-6 text-white">
+          <div className="flex items-start justify-between pt-8">
+            <div>
+              {founderName.trim() && <p className="text-sm text-white/45">{founderName.trim()}</p>}
+              <p className="mt-1 text-2xl font-medium tracking-tight">{companyName.trim() || "Live pitch"}</p>
+            </div>
+            {mode === "countdown" && (
+              <button type="button" onClick={leave} className="text-sm text-white/45 hover:text-white">Close</button>
+            )}
+          </div>
+          <div className="flex flex-1 flex-col items-center justify-center">
+            <div className="relative w-full max-w-3xl">
+              <svg className="pointer-events-none absolute -inset-3 h-[calc(100%+1.5rem)] w-[calc(100%+1.5rem)]" viewBox="0 0 160 90" preserveAspectRatio="none" aria-hidden>
+                <rect
+                  x="1.2"
+                  y="1.2"
+                  width="157.6"
+                  height="87.6"
+                  rx="2"
+                  fill="none"
+                  stroke={warm && mode === "recording" ? "hsl(28 90% 62%)" : "hsl(192 70% 72%)"}
+                  strokeWidth="0.7"
+                  pathLength={ring}
+                  strokeDasharray={ring}
+                  strokeDashoffset={mode === "recording" ? ring * (seconds / LIVE_MAX_SEC) : 0}
+                />
+              </svg>
+              <video ref={videoRef} muted playsInline className={cn("aspect-video w-full bg-black object-cover", mode === "saving" || mode === "error" ? "invisible" : "-scale-x-100")} />
+              {mode === "countdown" && countdown != null && countdown > 0 && (
+                <div className="absolute inset-0 grid place-items-center text-7xl font-medium tabular-nums">{countdown}</div>
+              )}
+              {mode === "recording" && (
+                <p className="absolute right-4 top-4 text-sm tabular-nums text-white/80">{formatClock(seconds)}</p>
+              )}
+            </div>
+            {mode === "countdown" && (
+              <div className="mt-8 flex h-6 items-end gap-1" aria-hidden>
+                {Array.from({ length: 18 }, (_, i) => {
+                  const dist = Math.abs(i - 8.5) / 8.5;
+                  const height = Math.max(0.15, level * (1 - dist * 0.7));
+                  return <span key={i} className="w-px bg-white/80" style={{ height: `${height * 24}px` }} />;
+                })}
+              </div>
+            )}
+            {mode === "recording" && (
+              <button type="button" onClick={finishRecording} className="mt-8 text-sm text-white/70 hover:text-white">Stop</button>
+            )}
+            {mode === "saving" && <p className="mt-8 text-sm text-white/45">Saving the take</p>}
+            {mode === "error" && (
+              <div className="mt-8 flex items-center gap-6 text-sm">
+                <p className="text-white/50">{error}</p>
+                {blob && <button type="button" onClick={() => void transcribe(blob)} className="text-white">Try again</button>}
+                <button type="button" onClick={leave} className="text-white/45">Close</button>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1403,12 +1499,13 @@ const PitchUs = () => {
                   <ReviewerCore live size={28} />
                   <p className="text-xs uppercase tracking-[0.22em] text-primary">Agent ready</p>
                 </div>
-                <h1 className="text-4xl font-medium tracking-tight text-white md:text-5xl">First Look</h1>
-                <p className="mt-3 max-w-md text-base text-white/55">
+                <h1 className="text-4xl font-medium tracking-tight text-white md:text-5xl">AI-pitch review</h1>
+                <p className="mt-3 max-w-xl text-base text-white/55">
                   {isRoundTwo
                     ? "Bring what changed. The next pass weighs it against the last one."
-                    : "Tell us who you are. Then hand the agent one source, or several."}
+                    : "Pitch your startup. Record your elevator pitch, up to 3 minutes. Upload a pitch deck and other files. Let our AI agent take a first look and give you honest feedback."}
                 </p>
+                <p className="mt-4 max-w-xl text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
               </div>
               <button type="button" onClick={() => go("/super-league")} className="text-sm text-white/50 hover:text-white">
                 Super League
@@ -1473,10 +1570,11 @@ const PitchUs = () => {
                     {[file, explainerFile, videoUrl.trim(), websiteUrl.trim(), liveTranscript.trim()].filter(Boolean).length || "None"} ready
                   </p>
                 </div>
+                <LivePitchRecorder transcript={liveTranscript} onTranscript={setLiveTranscript} founderName={founderName} companyName={companyName} />
                 <label className="pitch-row cursor-pointer">
                   <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", file ? "bg-primary" : "bg-white/25")} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[15px] text-white">Pitch deck</span>
+                    <span className="block text-[15px] text-white">Attach pitch deck</span>
                     <span className="block truncate text-xs text-white/40">{file ? file.name : "PDF, slides, or a doc"}</span>
                   </span>
                   {file ? (
@@ -1489,7 +1587,7 @@ const PitchUs = () => {
                 <label className="pitch-row cursor-pointer">
                   <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", explainerFile ? "bg-primary" : "bg-white/25")} />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[15px] text-white">Explainer</span>
+                    <span className="block text-[15px] text-white">Attach explainer video</span>
                     <span className="block truncate text-xs text-white/40">{explainerFile ? explainerFile.name : "A recorded video"}</span>
                   </span>
                   {explainerFile ? (
@@ -1499,7 +1597,6 @@ const PitchUs = () => {
                   )}
                   <input type="file" className="hidden" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" onChange={(e) => handleExplainer(e.target.files?.[0] ?? null)} />
                 </label>
-                <LivePitchRecorder transcript={liveTranscript} onTranscript={setLiveTranscript} />
                 <label className="pitch-row">
                   <Link2 className="h-3.5 w-3.5 shrink-0 text-white/35" />
                   <input className="w-full bg-transparent text-[15px] text-white placeholder:text-white/35 focus:outline-none" value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="Video link" />
@@ -1530,7 +1627,7 @@ const PitchUs = () => {
                     </>
                   ) : (
                     <>
-                      Run First Look <ArrowRight className="h-4 w-4" />
+                      Run AI-pitch review <ArrowRight className="h-4 w-4" />
                     </>
                   )}
                 </Button>
@@ -1586,7 +1683,7 @@ const PitchUs = () => {
               <div className="animate-fade-in">
                 <header className="mb-8">
                   <p className="text-xs uppercase tracking-[0.18em] text-primary">Read complete</p>
-                  <h2 className="mt-2 text-4xl font-medium tracking-tight text-white">{companyName.trim() || "First Look"}</h2>
+                  <h2 className="mt-2 text-4xl font-medium tracking-tight text-white">{companyName.trim() || "AI-pitch review"}</h2>
                 </header>
                 <ConvictionBlock verdict={verdict} confidence={confidence} />
 
@@ -1687,7 +1784,7 @@ const PitchUs = () => {
         {phase === "error" && (
           <section className="mx-auto max-w-md text-center animate-fade-in">
             <AlertTriangle className="mx-auto mb-4 h-8 w-8 text-destructive" />
-            <h2 className="text-2xl font-bold">AI: First Look interrupted</h2>
+            <h2 className="text-2xl font-bold">AI-pitch review interrupted</h2>
             <p className="mt-2 text-sm text-muted-foreground">{errorMsg}</p>
             <Button onClick={() => resetForRound(false)} className="mt-6 rounded-full bg-gradient-primary text-white">
               Try again

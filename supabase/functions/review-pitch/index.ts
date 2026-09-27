@@ -134,39 +134,50 @@ async function callOpenAI(opts: {
   const userContent: unknown = opts.parts?.length
     ? [{ type: "text", text: opts.user }, ...opts.parts]
     : opts.user;
+  const preferred = opts.model || "gpt-4o";
+  const models = preferred === "gpt-4o" ? ["gpt-4o"] : [preferred, "gpt-4o"];
 
-  const body: Record<string, unknown> = {
-    model: opts.model,
-    temperature: opts.temperature ?? 0.3,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: opts.system },
-      { role: "user", content: userContent },
-    ],
-  };
-  if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
+  let lastError = "OpenAI error: request failed";
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const body: Record<string, unknown> = {
+        model,
+        temperature: opts.temperature ?? 0.3,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: opts.system },
+          { role: "user", content: userContent },
+        ],
+      };
+      if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || "{}";
+        const finish = data.choices?.[0]?.finish_reason;
+        if (finish === "length") throw new Error("OpenAI response truncated — retry with shorter materials");
+        return content;
+      }
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenAI error: ${res.status} ${errText.slice(0, 500)}`);
+      const errText = await res.text();
+      lastError = `OpenAI error: ${res.status} ${errText.slice(0, 500)}`;
+      const retryable = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
+      if (retryable && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
   }
-
-  const data = await res.json();
-  const content = data.choices?.[0]?.message?.content || "{}";
-  const finish = data.choices?.[0]?.finish_reason;
-  if (finish === "length") {
-    throw new Error("OpenAI response truncated — retry with shorter materials");
-  }
-  return content;
+  throw new Error(lastError);
 }
 
 function parseJson<T>(raw: string): T {
@@ -459,6 +470,7 @@ function calibrateConfidence(
   return Math.round(Math.min(0.9, Math.max(0.28, c)) * 100) / 100;
 }
 
+
 async function webSearch(query: string): Promise<string> {
   const tavilyKey = Deno.env.get("TAVILY_API_KEY");
   if (tavilyKey) {
@@ -646,6 +658,169 @@ async function transcribeAudioVideo(bytes: Uint8Array, fileName: string, mime: s
   }
 }
 
+const SAFETY_VIOLATION = "Violating safety terms, this content cant be uploaded";
+
+async function assertPitchSafe(text: string, parts: FilePart[] = []): Promise<void> {
+  const sample = text.replace(/\s+/g, " ").trim().slice(0, 12000);
+  if (sample.length < 12 && parts.length === 0) return;
+  const apiKey = Deno.env.get("OPENAI_API_KEY");
+  if (!apiKey) throw new Error("Safety check could not be completed");
+
+  if (sample.length >= 12) {
+    const moderation = await fetch("https://api.openai.com/v1/moderations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "omni-moderation-latest", input: sample }),
+    });
+    if (moderation.ok) {
+      const moderationData = await moderation.json();
+      if (moderationData?.results?.[0]?.flagged) throw new Error(SAFETY_VIOLATION);
+    } else {
+      console.error("moderation skipped", moderation.status);
+    }
+  }
+
+  let raw = "";
+  try {
+    raw = await callOpenAI({
+      model: parts.length ? strongModel() : lightModel(),
+      maxTokens: 200,
+      parts: parts.length ? parts.slice(0, 4) : undefined,
+      system:
+        'You screen founder pitch materials: the deck, slides, images, live recording, explainer, video-link transcript, and the company website. Reply with JSON only: {"allow":true} or {"allow":false}. Set allow to false only when the material itself is a sermon, religious proselytizing, a political campaign or partisan attack, or is unsafe, harmful, discriminatory, or racist. A normal company pitch stays allow true, including mentions of a country, a customer, a market, a government contract, or regulation.',
+      user: sample || "Screen the attached deck or images.",
+    });
+  } catch (error) {
+    console.error("safety classifier failed", error);
+    return;
+  }
+  let verdict: { allow?: boolean | string } = {};
+  try {
+    verdict = parseJson<{ allow?: boolean | string }>(raw);
+  } catch (error) {
+    console.error("safety classifier returned unreadable JSON", error);
+    return;
+  }
+  if (verdict?.allow === false || verdict?.allow === "false") throw new Error(SAFETY_VIOLATION);
+}
+
+function youtubeId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") return parsed.pathname.split("/").filter(Boolean)[0] || null;
+    if (host.endsWith("youtube.com")) {
+      const watch = parsed.searchParams.get("v");
+      if (watch) return watch;
+      const nested = parsed.pathname.match(/\/(?:shorts|embed)\/([^/?]+)/);
+      if (nested) return nested[1];
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function downloadMedia(url: string): Promise<{ bytes: Uint8Array; name: string; mime: string } | null> {
+  const res = await fetch(url, {
+    redirect: "follow",
+    headers: { "User-Agent": "BoldBetsFirstLookBot/1.0 (+educational pitch review)" },
+  });
+  if (!res.ok) return null;
+  const mime = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  const fileLike = mime.startsWith("video/") || mime.startsWith("audio/") || /\.(mp4|webm|mov|m4v|mp3|wav|m4a)(\?|$)/i.test(new URL(url).pathname);
+  if (!fileLike) return null;
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (!bytes.byteLength || bytes.byteLength > 24 * 1024 * 1024) return null;
+  const name = new URL(url).pathname.split("/").pop() || "link-video.mp4";
+  return { bytes, name, mime: mime.startsWith("audio/") || mime.startsWith("video/") ? mime : "video/mp4" };
+}
+
+async function youtubeCaptionText(id: string): Promise<string | null> {
+  const watch = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(id)}`, {
+    redirect: "follow",
+    headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en" },
+  });
+  if (!watch.ok) return null;
+  const html = await watch.text();
+  const marker = html.indexOf('"captionTracks":');
+  if (marker < 0) return null;
+  const start = html.indexOf("[", marker);
+  if (start < 0) return null;
+  let depth = 0;
+  let end = start;
+  for (let i = start; i < Math.min(html.length, start + 30000); i += 1) {
+    if (html[i] === "[") depth += 1;
+    else if (html[i] === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  let tracks: { baseUrl?: string; languageCode?: string }[] = [];
+  try {
+    tracks = JSON.parse(html.slice(start, end));
+  } catch {
+    return null;
+  }
+  const track = tracks.find((item) => item.languageCode === "en" && item.baseUrl) || tracks.find((item) => item.baseUrl);
+  if (!track?.baseUrl) return null;
+  const caption = await fetch(track.baseUrl);
+  if (!caption.ok) return null;
+  const body = await caption.text();
+  const lines = [...body.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)].map((match) =>
+    match[1]
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/<[^>]+>/g, "")
+      .trim(),
+  ).filter(Boolean);
+  const text = lines.join(" ").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 12000) : null;
+}
+
+async function embeddedMediaUrl(pageUrl: string): Promise<string | null> {
+  const res = await fetch(pageUrl, {
+    redirect: "follow",
+    headers: {
+      "User-Agent": "BoldBetsFirstLookBot/1.0 (+educational pitch review)",
+      Accept: "text/html,video/*,audio/*",
+    },
+  });
+  if (!res.ok) return null;
+  const mime = (res.headers.get("content-type") || "").toLowerCase();
+  if (mime.startsWith("video/") || mime.startsWith("audio/")) return pageUrl;
+  const html = await res.text();
+  const og = html.match(/property=["']og:video(?::url)?["'][^>]*content=["']([^"']+)["']/i)
+    || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video(?::url)?["']/i);
+  if (og?.[1]) return new URL(og[1], pageUrl).toString();
+  const src = html.match(/<(?:video|source)[^>]+src=["']([^"']+)["']/i);
+  if (src?.[1]) return new URL(src[1], pageUrl).toString();
+  const loom = html.match(/https:\/\/cdn\.loom\.com\/[^"'\s]+\.mp4/);
+  return loom ? loom[0] : null;
+}
+
+async function transcribeVideoLink(url: string): Promise<string | null> {
+  const direct = await downloadMedia(url).catch(() => null);
+  if (direct) return transcribeAudioVideo(direct.bytes, direct.name, direct.mime);
+  const id = youtubeId(url);
+  if (id) {
+    const captions = await youtubeCaptionText(id).catch(() => null);
+    if (captions) return captions;
+  }
+  const embedded = await embeddedMediaUrl(url).catch(() => null);
+  if (embedded && embedded !== url) {
+    const media = await downloadMedia(embedded).catch(() => null);
+    if (media) return transcribeAudioVideo(media.bytes, media.name, media.mime);
+  }
+  return null;
+}
+
 async function fetchWebsiteDigest(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
@@ -795,6 +970,71 @@ async function loadAttachment(
   }
 }
 
+async function enrichBriefWithAnswers(
+  brief: Brief,
+  evidence: EvidenceRow[],
+  answersText: string,
+): Promise<{ brief: Brief; evidence: EvidenceRow[] }> {
+  const fallbackNotes = answersText.split(/\n(?=Q: )/).map((block) => `founder answer: ${block.replace(/\s+/g, " ").trim()}`);
+  const fallbackEvidence: EvidenceRow[] = [
+    ...evidence,
+    ...fallbackNotes.map((note) => ({
+      claim: note.replace(/^founder answer:\s*/i, "").slice(0, 180),
+      status: "weak" as const,
+      source: "founder answer",
+      note: "Added from the founder's answer.",
+    })),
+  ].slice(0, 8);
+
+  try {
+    const raw = await callOpenAI({
+      model: lightModel(),
+      temperature: 0.1,
+      maxTokens: 2200,
+      system: `You fold a founder's clarifying answers into an existing pitch brief and evidence table. The answers are new source material and must change the brief.
+Return JSON: {"brief":"the brief rewritten so each answer is woven in and cited as a founder answer","slide_notes":["founder answer: ..."],"evidence":[{"claim":"...","status":"supported|weak|unsupported|unknown","source":"founder answer | deck | website | video | brief","note":"one sentence"}]}
+Rules:
+- Keep every original claim. If an answer addresses it, update the note and status.
+- A specific number, date, or named customer in an answer can support that claim. Cite the source as "founder answer".
+- Do not downgrade a claim that was already supported.
+- If an answer adds a new fact, append it. Do not invent numbers the founder did not state.
+- Max 8 evidence rows.`,
+      user: `BRIEF:\n${brief.brief}\n\nSLIDE NOTES:\n${(brief.slide_notes || []).slice(0, 20).join("\n") || "(none)"}\n\nEVIDENCE:\n${evidence.map((e) => `- [${e.status}] ${e.claim} (${e.source}) — ${e.note}`).join("\n") || "(none)"}\n\nFOUNDER ANSWERS:\n${answersText}`,
+    });
+    const parsed = parseJson<{ brief?: string; slide_notes?: string[]; evidence?: EvidenceRow[] }>(raw);
+    const nextBrief = String(parsed.brief || "").trim();
+    const statuses = new Set(["supported", "weak", "unsupported", "unknown"]);
+    const nextEvidence = (parsed.evidence || [])
+      .map((row) => ({
+        claim: String(row.claim || "").trim(),
+        status: statuses.has(row.status) ? row.status : "weak" as const,
+        source: String(row.source || "founder answer").trim() || "founder answer",
+        note: String(row.note || "").trim(),
+      }))
+      .filter((row) => row.claim)
+      .slice(0, 8);
+    if (!nextBrief || !nextEvidence.length) throw new Error("enrichment empty");
+    return {
+      brief: {
+        ...brief,
+        brief: nextBrief,
+        slide_notes: [...(brief.slide_notes || []), ...(parsed.slide_notes || fallbackNotes)].slice(0, 30),
+      },
+      evidence: nextEvidence,
+    };
+  } catch (error) {
+    console.error("answer enrichment failed, appending answers", error);
+    return {
+      brief: {
+        ...brief,
+        brief: `${brief.brief}\n\nFounder answers to use in the analysis:\n${answersText}`,
+        slide_notes: [...(brief.slide_notes || []), ...fallbackNotes].slice(0, 30),
+      },
+      evidence: fallbackEvidence,
+    };
+  }
+}
+
 // ── Second half of the pipeline (fit → debate → verdict → note) ─────────────
 
 async function completeReview(ctx: {
@@ -916,7 +1156,7 @@ ${brief.slide_notes?.length ? `\nSLIDE NOTES:\n${brief.slide_notes.slice(0, 20).
 
 EVIDENCE TABLE:
 ${evidenceText}
-${answersText ? `\nFOUNDER ANSWERS TO CLARIFYING QUESTIONS (self-reported, treat as claims not proof):\n${answersText}` : ""}
+${answersText ? `\nFOUNDER ANSWERS (already folded into the brief and evidence; use them in the fit, the case against, the case for, and the signal; cite them as the founder's own figures):\n${answersText}` : ""}
 ${previousRound ? `\n${previousRound}` : ""}`;
 
   // ── FIT + SKEPTIC + CHAMPION (parallel debate) ─────────────────────────────
@@ -1221,7 +1461,11 @@ ${founderNote.slice(0, 900)}`,
         bull_case: bullCase,
         bear_case: bearCase,
         claim_checks: evidence,
-        scores: { values: scores, reasons: scoreReasons, persuasion: artifacts.persuasion || null },
+        scores: {
+          values: scores,
+          reasons: scoreReasons,
+          persuasion: artifacts.persuasion || null,
+        },
         red_flags: redFlags,
         comps,
         internal_memo: `${internalMemo}\n\n---\n${EDUCATIONAL_DISCLAIMER}`,
@@ -1350,13 +1594,38 @@ Deno.serve(async (req: Request) => {
         clarify.detail = answers.length ? `${answers.length} answer${answers.length > 1 ? "s" : ""} received` : "Skipped";
       }
 
+      let brief = state.brief;
+      let evidence = state.evidence;
+      let materials = state.materials;
+      if (answersText) {
+        if (clarify) clarify.detail = "Folding your answers into the brief";
+        await setProgress(supabase, pitchId, steps, state.artifacts, "reviewing");
+        const enriched = await enrichBriefWithAnswers(brief, evidence, answersText);
+        brief = enriched.brief;
+        evidence = enriched.evidence;
+        materials = `${materials}\n\n── FOUNDER ANSWERS (use these in the analysis) ──\n${answersText}`;
+        state.artifacts.evidence = evidence
+          .map((e) => ({
+            claim: safePublicLine(e.claim),
+            status: e.status,
+            source: safePublicLine(e.source) ?? "founder answer",
+            note: safePublicLine(e.note) ?? "",
+          }))
+          .filter((e): e is EvidenceRow => !!e.claim);
+        const evidenceStep = steps.find((s) => s.id === "evidence");
+        if (evidenceStep) {
+          const supported = evidence.filter((e) => e.status === "supported").length;
+          evidenceStep.detail = `${evidence.length} claims · ${supported} held up · answers included`;
+        }
+      }
+
       const result = await completeReview({
         supabase,
         pitchId,
         pitch,
-        brief: state.brief,
-        evidence: state.evidence,
-        materials: state.materials,
+        brief,
+        evidence,
+        materials,
         steps,
         artifacts: state.artifacts,
         answersText,
@@ -1396,27 +1665,43 @@ Deno.serve(async (req: Request) => {
     }
 
     if (pitch.video_url) {
-      step("ingest").detail = "Reading the video link";
+      step("ingest").detail = "Transcribing the video link";
       await setProgress(supabase, pitchId, steps, artifacts);
       const vurl = String(pitch.video_url);
-      const videoSearch = await webSearch(`${vurl} ${pitch.company_name} demo explainer`);
-      linkDigests.push(
-        `VIDEO LINK (${vurl}): treat as a primary demo/explainer source. Infer claims from titles/descriptions/transcripts available via research.\n${videoSearch || "(no extra page signal)"}`,
-      );
-      ingestNotes.push("Video link researched");
+      const spoken = await transcribeVideoLink(vurl);
+      if (spoken) {
+        linkDigests.push(`VIDEO LINK TRANSCRIPT (${vurl}) — spoken extract:\n${spoken}`);
+        ingestNotes.push("Video link transcribed");
+      } else {
+        linkDigests.push(`VIDEO LINK (${vurl}): the audio could not be transcribed. Do not treat a page title as the founder's words.`);
+        ingestNotes.push("Video link not transcribed");
+      }
     }
 
     if (attachment.textExtras) linkDigests.unshift(attachment.textExtras);
 
+    step("ingest").detail = "Safety check";
+    await setProgress(supabase, pitchId, steps, artifacts);
+    const founderMaterials = linkDigests.filter((block) => !block.startsWith("WEBSITE / REVIEW WEB SIGNAL"));
+    await assertPitchSafe(
+      [
+        String(pitch.pitch_narrative || ""),
+        String(pitch.one_liner || ""),
+        attachment.textExtras,
+        founderMaterials.join("\n\n"),
+      ].filter(Boolean).join("\n\n"),
+      attachment.parts,
+    );
+
     const materials = [
-      "SOURCE PRIORITY (educational review): 1) attached deck/doc/images/video transcript, 2) website + user reviews on it, 3) video links, 4) founder brief + one-liner. Prefer numbers and charts from attachments over marketing adjectives in the brief.",
+      "SOURCE PRIORITY: Read every extract together — the attached deck or document, the website digest, any video-file transcript, any video-link transcript, and the founder materials. The founder materials include the live-pitch speech-to-text and any explainer transcript when those were provided. Decide later what to keep.",
       `Company: ${pitch.company_name}`,
       `Founder: ${pitch.founder_name}`,
       `One-liner: ${pitch.one_liner}`,
       pitch.website_url ? `Website URL: ${pitch.website_url}` : null,
       pitch.video_url ? `Video URL: ${pitch.video_url}` : null,
       "",
-      "FOUNDER BRIEF / EXPLAINER (supporting, not the only source):",
+      "FOUNDER MATERIALS (live-pitch transcript and explainer transcript are included here when present):",
       String(pitch.pitch_narrative || "").slice(0, 16000),
       linkDigests.length ? `\n── PARSED ATTACHMENTS & LINK DIGESTS ──\n${linkDigests.join("\n\n").slice(0, 50000)}` : null,
     ]

@@ -383,7 +383,7 @@ const SuperLeague = () => {
             </p>
           </div>
           <button type="button" onClick={() => go("/")} className="text-sm text-white/50 hover:text-white">
-            First Look
+            AI-pitch review
           </button>
         </header>
 

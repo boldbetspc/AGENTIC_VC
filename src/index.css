@@ -125,6 +125,15 @@ All colors MUST be HSL.
   box-shadow: none;
 }
 
+.pitch-theme input:-webkit-autofill,
+.pitch-theme input:-webkit-autofill:hover,
+.pitch-theme input:-webkit-autofill:focus {
+  -webkit-text-fill-color: white;
+  caret-color: white;
+  box-shadow: 0 0 0 1000px #000 inset;
+  transition: background-color 99999s ease-out;
+}
+
 .pitch-theme .pitch-row {
   display: flex;
   align-items: center;
