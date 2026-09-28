@@ -11,6 +11,9 @@ import SuperLeagueInvite from "@/components/SuperLeagueInvite";
 const DISCLAIMER =
   "This AI review is for founders' educational purposes only. It does not represent any investment advice and there is no investment proposal. No offer to invest is being made and there is no solicitation made. Also there is no commitment to capital made.";
 
+const LIVE_DISCLAIMER =
+  "Educational pitch review only. Not an investment decision or a commitment.";
+
 const LABEL =
   "font-pitch-display text-xs font-semibold uppercase tracking-[0.14em] text-foreground/70";
 
@@ -1503,7 +1506,7 @@ const PitchUs = () => {
                 <p className="mt-3 max-w-xl text-base text-white/55">
                   {isRoundTwo
                     ? "Bring what changed. The next pass weighs it against the last one."
-                    : "Pitch your startup. Record your elevator pitch, up to 3 minutes. Upload a pitch deck and other files. Let our AI agent take a first look and give you honest feedback."}
+                    : "Tell us about your startup. Record a live elevator pitch, up to 3 minutes, OR upload a pitch deck and other info. An AI agent gives an educational pitch review: a high-level look at strengths and areas to help improve. This is not a funding decision, and it creates no financial commitment."}
                 </p>
                 <p className="mt-4 max-w-xl text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
               </div>
@@ -1639,6 +1642,7 @@ const PitchUs = () => {
 
         {inSession && (
           <section className="mx-auto max-w-5xl animate-fade-in">
+            <p className="mb-8 text-sm text-red-500">{LIVE_DISCLAIMER}</p>
             {phase !== "result" && (
             <header>
               <div className="mb-4 flex items-center gap-3">
