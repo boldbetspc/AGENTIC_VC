@@ -38,6 +38,11 @@ type Artifacts = {
   debate?: { against?: string; for?: string };
   questions?: string[];
   scores?: { values: Record<string, number>; reasons: Record<string, string> };
+  jev?: {
+    from?: string;
+    to?: string;
+    axes?: Array<{ key: string; label: string; score: number }>;
+  };
   persuasion?: {
     pathos: number;
     ethos: number;
@@ -578,6 +583,16 @@ const SCORE_LABELS: Record<string, string> = {
   financials: "Financial discipline",
 };
 
+function JevRead({ jev }: { jev: NonNullable<Artifacts["jev"]> }) {
+  const moved = jev.from && jev.to && jev.from !== jev.to;
+  if (!moved) return null;
+  return (
+    <p className="mt-4 text-sm text-white/55">
+      Signal moved from {jev.from} to {jev.to}
+    </p>
+  );
+}
+
 function ScoreBars({ scores }: { scores: NonNullable<Artifacts["scores"]> }) {
   const [armed, setArmed] = useState(false);
   useEffect(() => {
@@ -759,10 +774,31 @@ function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
   );
 }
 
-const VERDICT_STYLE: Record<string, { hue: string; caption: string }> = {
-  HOT: { hue: "18 95% 62%", caption: "Unusually strong read" },
-  WARM: { hue: "42 96% 58%", caption: "Real, but incomplete" },
-  PASS: { hue: "222 18% 62%", caption: "The gaps win this round" },
+const VERDICT_STYLE: Record<string, { hue: string; lines: [string, string, string] }> = {
+  HOT: {
+    hue: "18 95% 62%",
+    lines: [
+      "You didn't just explain it. You made it feel real.",
+      "What's left is a few improvements. Review the educational feedback with your own rigour, if it makes sense.",
+      "Keep practicing your pitch and keep improving. You're getting close to a pitch investors will feel.",
+    ],
+  },
+  WARM: {
+    hue: "42 96% 58%",
+    lines: [
+      "The idea comes through. That's the hard part.",
+      "The pitch still wobbles, and the notes only name some of the many improvements needed.",
+      "Keep practising your pitch with other founders. You'll hear what to fix.",
+    ],
+  },
+  PASS: {
+    hue: "222 18% 62%",
+    lines: [
+      "There's a real idea under this. The pitch isn't holding it yet.",
+      "The notes show a lot you could reshape.",
+      "Talk it through with other founders, then come back when the story feels tighter.",
+    ],
+  },
 };
 
 function ConvictionBlock({
@@ -778,21 +814,24 @@ function ConvictionBlock({
     <div className="animate-fade-in">
       <p className="text-xs uppercase tracking-[0.18em] text-white/35">Signal</p>
       <div className="mt-3 flex items-end justify-between gap-6">
-        <div>
-          <p
-            className="text-5xl font-medium tracking-tight"
-            style={{ color: `hsl(${style.hue})` }}
-          >
-            {verdict}
-          </p>
-          <p className="mt-2 text-base text-white/70">{style.caption}</p>
-        </div>
+        <p
+          className="text-5xl font-medium tracking-tight"
+          style={{ color: `hsl(${style.hue})` }}
+        >
+          {verdict}
+        </p>
         {pct != null && (
           <p className="text-right">
             <span className="block text-3xl font-medium tabular-nums text-white">{pct}%</span>
             <span className="text-xs uppercase tracking-[0.16em] text-white/40">Conviction</span>
           </p>
         )}
+      </div>
+      <div className="mt-4 max-w-xl space-y-1">
+        {style.lines.map((line) => (
+          <p key={line} className="text-sm leading-relaxed text-white/60">{line}</p>
+        ))}
+        <p className="pt-1 text-sm leading-relaxed text-white/45">Educational feedback only. This AI review is for founders' educational purposes only. It does not represent any investment advice. No offer to invest is being made and there is no commitment to capital made.</p>
       </div>
     </div>
   );
@@ -1502,7 +1541,7 @@ const PitchUs = () => {
                   <ReviewerCore live size={28} />
                   <p className="text-xs uppercase tracking-[0.22em] text-primary">Agent ready</p>
                 </div>
-                <h1 className="text-4xl font-medium tracking-tight text-white md:text-5xl">AI-pitch review</h1>
+                <h1 className="text-4xl font-medium tracking-tight text-white md:text-5xl">AI-pitch review · Beta</h1>
                 <p className="mt-3 max-w-xl text-base text-white/55">
                   {isRoundTwo
                     ? "Bring what changed. The next pass weighs it against the last one."
@@ -1621,7 +1660,7 @@ const PitchUs = () => {
                     checked={agreed}
                     onChange={(e) => setAgreed(e.target.checked)}
                   />
-                  <span>Educational only. Not investment advice, and not a funding decision.</span>
+                  <span>I understand this is for educational purposes only. It is not investment advice, not an offer to invest, and not a commitment of capital.</span>
                 </label>
                 <Button type="submit" disabled={submitting} className="pitch-launch gap-2 text-sm hover:brightness-110">
                   {submitting ? (
@@ -1635,7 +1674,6 @@ const PitchUs = () => {
                   )}
                 </Button>
               </div>
-              <p className="max-w-3xl text-xs leading-relaxed text-white/30">{DISCLAIMER}</p>
             </div>
           </form>
         )}
@@ -1690,6 +1728,7 @@ const PitchUs = () => {
                   <h2 className="mt-2 text-4xl font-medium tracking-tight text-white">{companyName.trim() || "AI-pitch review"}</h2>
                 </header>
                 <ConvictionBlock verdict={verdict} confidence={confidence} />
+                {artifacts.jev && <JevRead jev={artifacts.jev} />}
 
                 <div className="mt-10 grid items-start gap-12 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
                   <div>

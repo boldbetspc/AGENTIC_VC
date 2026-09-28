@@ -252,6 +252,11 @@ type Artifacts = {
   debate?: { against?: string; for?: string };
   questions?: string[];
   scores?: { values: Record<string, number>; reasons: Record<string, string> };
+  jev?: {
+    from?: string;
+    to?: string;
+    axes?: Array<{ key: string; label: string; score: number }>;
+  };
   persuasion?: {
     pathos: number;
     ethos: number;
@@ -470,6 +475,141 @@ function calibrateConfidence(
   return Math.round(Math.min(0.9, Math.max(0.28, c)) * 100) / 100;
 }
 
+const EVAL_AXES = [
+  { key: "problem", label: "Problem" },
+  { key: "solution", label: "Solution" },
+  { key: "market", label: "Market" },
+  { key: "team", label: "Team" },
+  { key: "opportunities_threats", label: "Opportunities" },
+  { key: "financials", label: "Financials" },
+] as const;
+
+type JevPass = {
+  finalSignal: Verdict;
+  synthesisSignal: Verdict;
+  conviction: number | null;
+  axes: Array<{ key: string; label: string; score: number }>;
+};
+
+function clipText(value: unknown, max: number): string {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+/** SDK scores are a 0–4 index across five levels and may sit between levels. */
+function scoreUnit(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 4) return null;
+  return n / 4;
+}
+
+function jevQuestions(): Record<string, unknown> {
+  const levels = [
+    "The case on this axis is weak or missing",
+    "Thin, with material gaps",
+    "Real, but not distinctive",
+    "Strong and specifically supported",
+    "Exceptional and hard to dismiss",
+  ];
+  const questions: Record<string, unknown> = {
+    signal: {
+      type: "choice",
+      instructions: "Choose the educational signal the debate supports. The proposed word is a starting point you may keep or replace. HOT only when the proof is exceptional and specific. WARM when the case is real but incomplete. PASS when the gaps dominate.",
+      criteria: {
+        HOT: "Unusually strong case with specific proof",
+        WARM: "Real case, with material gaps still open",
+        PASS: "The gaps outweigh the case",
+      },
+    },
+    conviction: {
+      type: "score",
+      instructions: "How sure is this signal? Score low when the case is thin. Score high only when the main claims are specifically supported. This is certainty of the read, not how strong the company is.",
+      criteria: [
+        "The case is too thin to be sure",
+        "A few points hold, with large gaps",
+        "Mixed: some proof and some holes",
+        "Several specific points hold",
+        "The main claims are specifically supported",
+      ],
+    },
+  };
+  for (const axis of EVAL_AXES) {
+    questions[axis.key] = {
+      type: "score",
+      instructions: `How strong is the ${axis.label.toLowerCase()} case in this debate? Judge the insight, not whether a number was written down.`,
+      criteria: levels,
+    };
+  }
+  return questions;
+}
+
+async function jevSystemOne(
+  state: Record<string, string>,
+  apiKey: string,
+  questions: Record<string, unknown>,
+): Promise<{ answers: Record<string, Record<string, unknown>> } | { error: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch("https://api.typesafe.ai/v1/systemone", {
+      method: "POST",
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ state, questions, model: "jev-1.13.0" }),
+    });
+    const bodyText = await res.text();
+    if (!res.ok) return { error: `JEV ${res.status}: ${bodyText.slice(0, 180)}` };
+    const body = JSON.parse(bodyText);
+    if (!body?.answers) return { error: "JEV returned no answers" };
+    return { answers: body.answers };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "JEV request failed";
+    return { error: message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function jevSecondPass(
+  packet: { brief: string; killShot: string; nonObvious: string; panelScores: string },
+  synthesisWord: Verdict,
+): Promise<JevPass | null> {
+  const apiKey = Deno.env.get("JEV-API-KEY") || Deno.env.get("JEV_API_KEY");
+  if (!apiKey) {
+    console.error("jev pass skipped: JEV-API-KEY is not set");
+    return null;
+  }
+  const questions = jevQuestions();
+  const result = await jevSystemOne(
+    {
+      proposedSignal: synthesisWord,
+      analystBrief: clipText(packet.brief, 3500),
+      hardestIssue: clipText(packet.killShot, 600),
+      strongestPoint: clipText(packet.nonObvious, 600),
+      panelScores: clipText(packet.panelScores, 1800),
+    },
+    apiKey,
+    questions,
+  );
+  if ("error" in result) {
+    console.error("jev pass skipped", result.error);
+    return null;
+  }
+  const answers = result.answers;
+  const choice = String(answers.signal?.choice || "").toUpperCase();
+  const finalSignal: Verdict = (["HOT", "WARM", "PASS"] as const).includes(choice as Verdict)
+    ? choice as Verdict
+    : synthesisWord;
+  const unit = scoreUnit(answers.conviction?.score);
+  const conviction = unit == null
+    ? null
+    : Math.round(Math.min(0.9, Math.max(0.28, 0.32 + unit * 0.56)) * 100) / 100;
+  const axes = EVAL_AXES.flatMap((axis) => {
+    const raw = answers[axis.key];
+    const placed = scoreUnit(raw && typeof raw === "object" ? raw.score : undefined);
+    return placed == null ? [] : [{ key: axis.key, label: axis.label, score: Math.round(placed * 100) }];
+  });
+  return { finalSignal, synthesisSignal: synthesisWord, conviction, axes };
+}
 
 async function webSearch(query: string): Promise<string> {
   const tavilyKey = Deno.env.get("TAVILY_API_KEY");
@@ -1251,20 +1391,42 @@ ${memoryText || "(none yet)"}`,
   });
   const synth = parseJson<SynthOut>(synthRaw);
 
-  const verdict: Verdict = (["HOT", "WARM", "PASS"] as const).includes(synth.verdict) ? synth.verdict : "WARM";
+  const synthesisWord: Verdict = (["HOT", "WARM", "PASS"] as const).includes(synth.verdict) ? synth.verdict : "WARM";
   const redFlags = (Array.isArray(synth.red_flags) ? synth.red_flags : [])
       .map((f) => String(f).trim())
       .filter(Boolean)
       .filter((f) => !lineFailsGuardrails(f))
       .slice(0, 8);
   const scores = synth.scores && typeof synth.scores === "object" ? synth.scores : {};
-  const confidence = calibrateConfidence(
+  const panelScores = EVAL_AXES.map(({ key, label }) => {
+    const value = Number(scores[key]);
+    const why = clipText(synth.score_reasons?.[key], 220);
+    return `${label}: ${Number.isFinite(value) ? Math.round(value) : "—"}/100. ${why}`;
+  }).join("\n");
+  const jev = await jevSecondPass(
+    {
+      brief: brief.brief,
+      killShot: skeptic.kill_shot,
+      nonObvious: champion.non_obvious,
+      panelScores,
+    },
+    synthesisWord,
+  );
+  const verdict: Verdict = jev?.finalSignal ?? synthesisWord;
+  const confidence = jev?.conviction ?? calibrateConfidence(
     verdict,
     synth.confidence,
     redFlags,
     scores,
     evidence,
   );
+  if (jev?.axes.length) {
+    artifacts.jev = {
+      from: jev.synthesisSignal,
+      to: jev.finalSignal,
+      axes: jev.axes,
+    };
+  }
 
   const scoreReasons: Record<string, string> = {};
   for (const [k, v] of Object.entries(synth.score_reasons || {})) {
@@ -1465,6 +1627,7 @@ ${founderNote.slice(0, 900)}`,
           values: scores,
           reasons: scoreReasons,
           persuasion: artifacts.persuasion || null,
+          jev: artifacts.jev || null,
         },
         red_flags: redFlags,
         comps,
