@@ -53,6 +53,8 @@ type Artifacts = {
     persona: string;
     blurb: string;
   };
+  numbers?: Array<{ metric: string; value: string; slide: string }>;
+  cross_checks?: string[];
 };
 
 type Phase = "intake" | "reviewing" | "questions" | "result" | "error";
@@ -60,6 +62,7 @@ type Phase = "intake" | "reviewing" | "questions" | "result" | "error";
 const INITIAL_STEPS: ProgressStep[] = [
   { id: "ingest", label: "Ingest materials", status: "running" },
   { id: "brief", label: "Analyst brief", status: "pending" },
+  { id: "numbers", label: "Number crunch", status: "pending" },
   { id: "evidence", label: "Evidence check", status: "pending" },
   { id: "fit", label: "Thesis fit", status: "pending" },
   { id: "skeptic", label: "Case against", status: "pending" },
@@ -144,6 +147,7 @@ function ElapsedTimer({ running, className }: { running: boolean; className?: st
 const STEP_SHORT: Record<string, string> = {
   ingest: "Ingest",
   brief: "Brief",
+  numbers: "Crunch",
   evidence: "Evidence",
   clarify: "You",
   fit: "Fit",
@@ -266,7 +270,7 @@ function RevealCount({
 
 const EVIDENCE_BADGE: Record<EvidenceRow["status"], { label: string; cls: string }> = {
   supported: {
-    label: "Held up",
+    label: "Consistent",
     cls: "border-secondary bg-secondary/15 text-secondary shadow-[0_0_12px_hsl(162_84%_56%/0.25)]",
   },
   weak: {
@@ -312,7 +316,7 @@ function ClaimChips({ artifacts }: { artifacts: Artifacts }) {
     <div className="mt-2 space-y-1.5 pl-7">
       {hasEvidence && (
         <p className="font-pitch-serif text-sm italic text-muted-foreground/75">
-          Checked against deck, charts, website, video &amp; brief
+          Checked against the other numbers, not just whether a figure is written down
         </p>
       )}
       <div className="flex flex-wrap gap-1.5">
@@ -324,7 +328,7 @@ function ClaimChips({ artifacts }: { artifacts: Artifacts }) {
             <span
               key={i}
               style={{ animationDelay: `${i * 90}ms` }}
-              title={ev ? `${ev.note || ""}${ev.source ? ` · ${ev.source}` : ""}`.trim() : "Awaiting materials check"}
+              title={ev ? `${ev.note || ""}${ev.source ? ` · ${ev.source}` : ""}`.trim() : "Awaiting the number check"}
               className={cn(
                 "inline-flex max-w-full items-center gap-1.5 font-pitch-display text-sm tracking-wide transition-all duration-500 animate-thought-in",
                 badge ? badge.cls : "text-white/40",
@@ -414,6 +418,7 @@ function ThoughtStream({
           const isCurrent = s.status === "running";
           const isDone = s.status === "done";
           const showClaims = s.id === "evidence" && (isCurrent || isDone) && (artifacts.claims?.length || 0) > 0;
+          const showCrunch = s.id === "numbers" && (isCurrent || isDone) && ((artifacts.numbers?.length || 0) > 0 || (artifacts.cross_checks?.length || 0) > 0);
           const teaser =
             s.id === "skeptic" && isDone
               ? artifacts.debate?.against
@@ -466,6 +471,18 @@ function ThoughtStream({
                   )}
                 </span>
               </div>
+              {showCrunch && (
+                <div className="mt-2 space-y-1 pl-8">
+                  {(artifacts.numbers || []).slice(0, 8).map((row, i) => (
+                    <p key={`${row.slide}-${row.metric}-${i}`} className="text-sm text-white/55">
+                      <span className="text-white/35">{row.slide}</span> {row.metric} {row.value}
+                    </p>
+                  ))}
+                  {(artifacts.cross_checks || []).slice(0, 4).map((line) => (
+                    <p key={line} className="text-sm leading-relaxed text-white/70">{line}</p>
+                  ))}
+                </div>
+              )}
               {showClaims && <ClaimChips artifacts={artifacts} />}
               {teaser && (
                 <p className="mt-2 animate-fade-in pl-8 text-sm leading-relaxed text-white/55">
@@ -568,7 +585,7 @@ function parseMemo(feedback: string): MemoBlock[] {
 
 function memoBlockLabel(block: MemoBlock, paraIndex: number): string {
   if (block.kind === "question") return "THE QUESTION";
-  if (block.kind === "bullets") return "EVIDENCE";
+  if (block.kind === "bullets") return "TO IMPROVE";
   if (paraIndex === 0) return "THE READ";
   if (paraIndex === 1) return "THE PUSH";
   return "NOTE";
@@ -737,12 +754,45 @@ const FEEDBACK_BADGE: Record<EvidenceRow["status"], string> = {
   unknown: "text-white/45",
 };
 
+function NumberLedger({
+  numbers,
+  checks,
+}: {
+  numbers: NonNullable<Artifacts["numbers"]>;
+  checks: string[];
+}) {
+  if (!numbers.length && !checks.length) return null;
+  return (
+    <div className="animate-fade-in">
+      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Numbers</p>
+      {numbers.length > 0 && (
+        <div className="mt-2">
+          {numbers.slice(0, 12).map((row, i) => (
+            <div key={`${row.slide}-${row.metric}-${i}`} className="flex gap-3 border-b border-white/10 py-2 text-sm">
+              <span className="w-16 shrink-0 text-white/40">{row.slide}</span>
+              <span className="min-w-0 flex-1 text-white/80">{row.metric}</span>
+              <span className="shrink-0 tabular-nums text-white">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {checks.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {checks.slice(0, 4).map((line) => (
+            <li key={line} className="text-sm leading-relaxed text-white/70">{line}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
   const [open, setOpen] = useState<number | null>(null);
   if (!evidence.length) return null;
   return (
     <div className="animate-fade-in">
-      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Materials check</p>
+      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Cross-check</p>
       <div className="mt-2">
         {evidence.map((e, i) => {
           const tone = FEEDBACK_BADGE[e.status] || FEEDBACK_BADGE.unknown;
@@ -1785,6 +1835,7 @@ const PitchUs = () => {
                   <div className="space-y-10">
                     {artifacts.persuasion && <PersuasionMeter persuasion={artifacts.persuasion} />}
                     {artifacts.scores && <ScoreBars scores={artifacts.scores} />}
+                    <NumberLedger numbers={artifacts.numbers || []} checks={(artifacts.cross_checks || []).slice(0, 4)} />
                     <EvidencePanel evidence={artifacts.evidence || []} />
                   </div>
                 </div>
