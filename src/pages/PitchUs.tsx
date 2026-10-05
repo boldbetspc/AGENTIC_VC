@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, Paperclip, Link2, Loader2, AlertTriangle, X, ChevronDown, Video } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -472,21 +472,17 @@ function ThoughtStream({
                 </span>
               </div>
               {showCrunch && (
-                <div className="mt-2 space-y-1 pl-8">
-                  {(artifacts.numbers || []).slice(0, 8).map((row, i) => (
-                    <p key={`${row.slide}-${row.metric}-${i}`} className="text-sm text-white/55">
-                      <span className="text-white/35">{row.slide}</span> {row.metric} {row.value}
-                    </p>
-                  ))}
-                  {(artifacts.cross_checks || []).slice(0, 4).map((line) => (
-                    <p key={line} className="text-sm leading-relaxed text-white/70">{line}</p>
-                  ))}
+                <div className="mt-3 space-y-4 pl-8">
+                  <NumberTable numbers={(artifacts.numbers || []).slice(0, 8)} />
+                  {(artifacts.cross_checks || []).length > 0 && (
+                    <MathChecks checks={(artifacts.cross_checks || []).slice(0, 4)} />
+                  )}
                 </div>
               )}
               {showClaims && <ClaimChips artifacts={artifacts} />}
               {teaser && (
                 <p className="mt-2 animate-fade-in pl-8 text-sm leading-relaxed text-white/55">
-                  “{teaser}”
+                  {s.id === "skeptic" ? teaser : `“${teaser}”`}
                 </p>
               )}
             </li>
@@ -580,7 +576,18 @@ function parseMemo(feedback: string): MemoBlock[] {
       blocks.push({ kind: "para", lines: [line] });
     }
   }
-  return blocks;
+  const question = blocks.find((block) => block.kind === "question");
+  const rest = blocks.filter((block) => block.kind !== "question");
+  if (!question) return rest;
+  const paras = rest.filter((block) => block.kind === "para");
+  const push = paras[1] || paras[0];
+  const sentence = question.lines.join(" ").trim();
+  if (!push) return [{ kind: "para", lines: [sentence] }, ...rest];
+  const existing = push.lines.join(" ");
+  if (!existing.toLowerCase().includes(sentence.slice(0, 48).toLowerCase())) {
+    push.lines = [`${existing} ${sentence}`.trim()];
+  }
+  return rest;
 }
 
 function memoBlockLabel(block: MemoBlock, paraIndex: number): string {
@@ -619,9 +626,7 @@ function ScoreBars({ scores }: { scores: NonNullable<Artifacts["scores"]> }) {
   const entries = Object.entries(scores.values).filter(([, v]) => Number.isFinite(v));
   if (!entries.length) return null;
   return (
-    <div className="animate-fade-in">
-      <p className="text-xs uppercase tracking-[0.18em] text-white/35">By dimension</p>
-      <div className="mt-4 space-y-4">
+    <div className="animate-fade-in space-y-4">
         {entries.map(([key, value], i) => (
           <div key={key}>
             <div className="flex items-baseline justify-between gap-3">
@@ -642,7 +647,6 @@ function ScoreBars({ scores }: { scores: NonNullable<Artifacts["scores"]> }) {
             )}
           </div>
         ))}
-      </div>
     </div>
   );
 }
@@ -727,8 +731,7 @@ function PersuasionMeter({
 
   return (
     <div className="animate-fade-in">
-      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Persuasion</p>
-      <p className="mt-3 text-2xl font-medium tracking-tight text-white">{persuasion.persona}</p>
+      <p className="text-2xl font-medium tracking-tight text-white">{persuasion.persona}</p>
       <p className="mt-1 text-sm text-white/55">{persuasion.blurb}</p>
       <div className="mt-5">
         {rows.map((row) => (
@@ -754,37 +757,91 @@ const FEEDBACK_BADGE: Record<EvidenceRow["status"], string> = {
   unknown: "text-white/45",
 };
 
-function NumberLedger({
-  numbers,
-  checks,
+const RESULT_HEAD = "grid w-full grid-cols-[8.5rem_minmax(0,1fr)] items-baseline gap-x-3 text-left md:gap-x-6";
+const RESULT_ROW = "border-b border-white/10 py-4 md:grid md:grid-cols-[8.5rem_minmax(0,1fr)] md:items-baseline md:gap-x-6";
+const RESULT_BODY = "grid grid-cols-1 pb-5 md:grid-cols-[8.5rem_minmax(0,1fr)] md:gap-x-6";
+
+function ResultFold({
+  title,
+  summary,
+  defaultOpen = false,
+  children,
 }: {
-  numbers: NonNullable<Artifacts["numbers"]>;
-  checks: string[];
+  title: string;
+  summary: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
 }) {
-  if (!numbers.length && !checks.length) return null;
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="animate-fade-in">
-      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Numbers</p>
-      {numbers.length > 0 && (
-        <div className="mt-2">
-          {numbers.slice(0, 12).map((row, i) => (
-            <div key={`${row.slide}-${row.metric}-${i}`} className="flex gap-3 border-b border-white/10 py-2 text-sm">
-              <span className="w-16 shrink-0 text-white/40">{row.slide}</span>
-              <span className="min-w-0 flex-1 text-white/80">{row.metric}</span>
-              <span className="shrink-0 tabular-nums text-white">{row.value}</span>
-            </div>
-          ))}
+    <section className="border-b border-white/10">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className={cn(RESULT_HEAD, "py-4")}
+      >
+        <span className="text-xs uppercase tracking-[0.16em] text-white/40">{title}</span>
+        <span className="flex min-w-0 flex-1 items-baseline justify-between gap-3">
+          <span className="truncate text-sm text-white/55">{summary}</span>
+          <ChevronDown className={cn("h-4 w-4 shrink-0 text-white/35 transition-transform", open && "rotate-180")} />
+        </span>
+      </button>
+      {open && (
+        <div className={RESULT_BODY}>
+          <div className="hidden md:block" aria-hidden />
+          <div className="min-w-0 animate-fade-in">{children}</div>
         </div>
       )}
-      {checks.length > 0 && (
-        <ul className="mt-3 space-y-2">
-          {checks.slice(0, 4).map((line) => (
-            <li key={line} className="text-sm leading-relaxed text-white/70">{line}</li>
-          ))}
-        </ul>
-      )}
+    </section>
+  );
+}
+
+function NumberTable({ numbers }: { numbers: NonNullable<Artifacts["numbers"]> }) {
+  if (!numbers.length) return null;
+  return (
+    <div>
+      <div className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] gap-x-4 pb-1">
+        <p className="text-[10px] uppercase tracking-[0.16em] text-white/30">Slide</p>
+        <p className="text-[10px] uppercase tracking-[0.16em] text-white/30">Metric</p>
+        <p className="text-right text-[10px] uppercase tracking-[0.16em] text-white/30">Value</p>
+      </div>
+      {numbers.map((row, i) => (
+        <div
+          key={`${row.slide}-${row.metric}-${i}`}
+          className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-baseline gap-x-4 border-t border-white/10 py-2"
+        >
+          <p className="truncate text-xs text-white/40">{row.slide}</p>
+          <p className="min-w-0 text-sm text-white/80">{row.metric}</p>
+          <p className="text-right text-sm tabular-nums text-white">{row.value}</p>
+        </div>
+      ))}
     </div>
   );
+}
+
+function MathChecks({ checks }: { checks: string[] }) {
+  return (
+    <ul>
+      {checks.map((line, i) => (
+        <li key={i} className="border-t border-white/10 py-3 text-sm leading-relaxed text-white/75 first:border-t-0 first:pt-0">
+          {line}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function evidenceSummary(evidence: EvidenceRow[]): string {
+  const counts = { supported: 0, weak: 0, unsupported: 0, unknown: 0 };
+  for (const row of evidence) counts[row.status] += 1;
+  const parts = [
+    counts.supported ? `${counts.supported} consistent` : "",
+    counts.unsupported ? `${counts.unsupported} didn't hold` : "",
+    counts.weak ? `${counts.weak} thin` : "",
+    counts.unknown ? `${counts.unknown} unverified` : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "No claims checked";
 }
 
 function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
@@ -792,34 +849,31 @@ function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
   if (!evidence.length) return null;
   return (
     <div className="animate-fade-in">
-      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Cross-check</p>
-      <div className="mt-2">
-        {evidence.map((e, i) => {
-          const tone = FEEDBACK_BADGE[e.status] || FEEDBACK_BADGE.unknown;
-          const label = (EVIDENCE_BADGE[e.status] || EVIDENCE_BADGE.unknown).label;
-          const expanded = open === i;
-          return (
-            <button
-              key={i}
-              type="button"
-              onClick={() => setOpen(expanded ? null : i)}
-              className="block w-full border-b border-white/10 py-3 text-left"
-            >
-              <div className="flex items-baseline gap-3">
-                <span className={cn("w-24 shrink-0 text-xs", tone)}>{label}</span>
-                <span className="min-w-0 flex-1 text-sm text-white">{e.claim}</span>
-                <span className="shrink-0 text-xs text-white/40">{materialSourceLabel(e.source)}</span>
-                <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 text-white/40 transition-transform", expanded && "rotate-180")} />
-              </div>
-              {expanded && (
-                <p className="mt-2 pl-24 text-sm leading-relaxed text-white/60">
-                  {e.note || "No further detail."}
-                </p>
-              )}
-            </button>
-          );
-        })}
-      </div>
+      {evidence.map((e, i) => {
+        const tone = FEEDBACK_BADGE[e.status] || FEEDBACK_BADGE.unknown;
+        const label = (EVIDENCE_BADGE[e.status] || EVIDENCE_BADGE.unknown).label;
+        const expanded = open === i;
+        return (
+          <button
+            key={i}
+            type="button"
+            onClick={() => setOpen(expanded ? null : i)}
+            className="block w-full border-t border-white/10 py-3 text-left first:border-t-0 first:pt-0"
+          >
+            <div className="flex items-baseline gap-3">
+              <span className={cn("w-[6.75rem] shrink-0 text-xs", tone)}>{label}</span>
+              <span className="min-w-0 flex-1 text-sm text-white">{e.claim}</span>
+              <span className="hidden shrink-0 text-xs text-white/40 sm:inline">{materialSourceLabel(e.source)}</span>
+              <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 text-white/40 transition-transform", expanded && "rotate-180")} />
+            </div>
+            {expanded && (
+              <p className="mt-2 text-sm leading-relaxed text-white/60 sm:pl-[7.5rem]">
+                {e.note || "No further detail."}
+              </p>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1773,23 +1827,21 @@ const PitchUs = () => {
 
             {phase === "result" && verdict && (
               <div className="animate-fade-in">
-                <header className="mb-8">
-                  <p className="text-xs uppercase tracking-[0.18em] text-primary">Read complete</p>
-                  <h2 className="mt-2 text-4xl font-medium tracking-tight text-white">{companyName.trim() || "AI-pitch review"}</h2>
+                <header className="mb-8 flex items-end justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-primary">Read complete</p>
+                    <h2 className="mt-2 text-4xl font-medium tracking-tight text-white">{companyName.trim() || "AI-pitch review"}</h2>
+                  </div>
+                  {noteDone && (
+                    <button type="button" onClick={copyNote} className="text-sm text-white/45 hover:text-white">
+                      {copied ? "Copied" : "Copy"}
+                    </button>
+                  )}
                 </header>
                 <ConvictionBlock verdict={verdict} confidence={confidence} />
                 {artifacts.jev && <JevRead jev={artifacts.jev} />}
 
-                <div className="mt-10 grid items-start gap-12 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
-                  <div>
-                    <div className="mb-2 flex items-baseline justify-between">
-                      <p className="text-xs uppercase tracking-[0.18em] text-white/35">Notes</p>
-                      {noteDone && (
-                        <button type="button" onClick={copyNote} className="text-sm text-white/45 hover:text-white">
-                          {copied ? "Copied" : "Copy"}
-                        </button>
-                      )}
-                    </div>
+                <div className="mt-10">
                     <div>
                       {memoBlocks.slice(0, blockIdx + 1).map((block, i) => {
                         if (block.kind === "para") paraCount += 1;
@@ -1797,13 +1849,14 @@ const PitchUs = () => {
                         const isTyping = i === blockIdx;
                         const isQuestion = block.kind === "question";
                         return (
-                          <div key={i} className="animate-thought-in border-b border-white/10 py-4">
+                          <div key={i} className={cn("animate-thought-in", RESULT_ROW)}>
                             <p className="text-xs uppercase tracking-[0.16em] text-white/35">{label}</p>
+                            <div className="mt-2 min-w-0 md:mt-0">
                             {block.kind === "bullets" ? (
                               isTyping ? (
                                 <RevealCount total={block.lines.length} onDone={() => setBlockIdx((n) => n + 1)}>
                                   {(visible) => (
-                                    <ul className="mt-2 space-y-2">
+                                    <ul className="space-y-2">
                                       {block.lines.slice(0, visible).map((l, j) => (
                                         <li key={j} className="text-base leading-relaxed text-white/90">{l}</li>
                                       ))}
@@ -1811,14 +1864,14 @@ const PitchUs = () => {
                                   )}
                                 </RevealCount>
                               ) : (
-                                <ul className="mt-2 space-y-2">
+                                <ul className="space-y-2">
                                   {block.lines.map((l, j) => (
                                     <li key={j} className="text-base leading-relaxed text-white/90">{l}</li>
                                   ))}
                                 </ul>
                               )
                             ) : (
-                              <p className={cn("mt-2 leading-relaxed text-white/90", isQuestion ? "text-xl text-white" : "text-base")}>
+                              <p className={cn("leading-relaxed text-white/90", isQuestion ? "text-xl text-white" : "text-base")}>
                                 {isTyping ? (
                                   <TypeText text={block.lines.join(" ")} onDone={() => setBlockIdx((n) => n + 1)} />
                                 ) : (
@@ -1826,18 +1879,36 @@ const PitchUs = () => {
                                 )}
                               </p>
                             )}
+                            </div>
                           </div>
                         );
                       })}
                     </div>
-                  </div>
-
-                  <div className="space-y-10">
-                    {artifacts.persuasion && <PersuasionMeter persuasion={artifacts.persuasion} />}
-                    {artifacts.scores && <ScoreBars scores={artifacts.scores} />}
-                    <NumberLedger numbers={artifacts.numbers || []} checks={(artifacts.cross_checks || []).slice(0, 4)} />
-                    <EvidencePanel evidence={artifacts.evidence || []} />
-                  </div>
+                    {artifacts.scores && (
+                      <ResultFold title="Scores" summary={`${Object.keys(artifacts.scores.values).length} dimensions`} defaultOpen>
+                        <ScoreBars scores={artifacts.scores} />
+                      </ResultFold>
+                    )}
+                    {artifacts.persuasion && (
+                      <ResultFold title="Persuasion" summary={artifacts.persuasion.persona} defaultOpen>
+                        <PersuasionMeter persuasion={artifacts.persuasion} />
+                      </ResultFold>
+                    )}
+                    {(artifacts.numbers || []).length > 0 && (
+                      <ResultFold title="Numbers" summary={`${artifacts.numbers!.length} figures`}>
+                        <NumberTable numbers={artifacts.numbers || []} />
+                      </ResultFold>
+                    )}
+                    {(artifacts.cross_checks || []).length > 0 && (
+                      <ResultFold title="Math" summary={`${artifacts.cross_checks!.length} ${artifacts.cross_checks!.length === 1 ? "tension" : "tensions"}`}>
+                        <MathChecks checks={artifacts.cross_checks || []} />
+                      </ResultFold>
+                    )}
+                    {(artifacts.evidence || []).length > 0 && (
+                      <ResultFold title="Evidence" summary={evidenceSummary(artifacts.evidence || [])}>
+                        <EvidencePanel evidence={artifacts.evidence || []} />
+                      </ResultFold>
+                    )}
                 </div>
 
                 <SuperLeagueInvite
