@@ -1235,43 +1235,45 @@ async function jevSystemOne(
 async function jevSecondPass(
   packet: { brief: string; killShot: string; nonObvious: string; panelScores: string; numberContext?: string },
   synthesisWord: Verdict,
-): Promise<JevPass | null> {
+): Promise<JevPass> {
   const apiKey = Deno.env.get("JEV-API-KEY") || Deno.env.get("JEV_API_KEY");
   if (!apiKey) {
-    console.error("jev pass skipped: JEV-API-KEY is not set");
-    return null;
+    console.error("JEV-API-KEY is not set");
+    throw new Error("The review stopped because the second signal pass is not configured.");
   }
   const questions = jevQuestions();
-  const result = await jevSystemOne(
-    {
-      proposedSignal: synthesisWord,
-      analystBrief: clipText(`${packet.brief}\n\n${packet.numberContext || ""}`, 3500),
-      hardestIssue: clipText(packet.killShot, 600),
-      strongestPoint: clipText(packet.nonObvious, 600),
-      panelScores: clipText(packet.panelScores, 1800),
-    },
-    apiKey,
-    questions,
-  );
+  const state = {
+    proposedSignal: synthesisWord,
+    analystBrief: clipText(`${packet.brief}\n\n${packet.numberContext || ""}`, 3500),
+    hardestIssue: clipText(packet.killShot, 600),
+    strongestPoint: clipText(packet.nonObvious, 600),
+    panelScores: clipText(packet.panelScores, 1800),
+  };
+  let result = await jevSystemOne(state, apiKey, questions);
   if ("error" in result) {
-    console.error("jev pass skipped", result.error);
-    return null;
+    console.error("jev pass retry", result.error);
+    result = await jevSystemOne(state, apiKey, questions);
+  }
+  if ("error" in result) {
+    console.error("jev pass failed", result.error);
+    throw new Error("The review stopped because the second signal pass did not finish.");
   }
   const answers = result.answers;
   const choice = String(answers.signal?.choice || "").toUpperCase();
-  const finalSignal: Verdict = (["HOT", "WARM", "PASS"] as const).includes(choice as Verdict)
-    ? choice as Verdict
-    : synthesisWord;
+  if (!(["HOT", "WARM", "PASS"] as const).includes(choice as Verdict)) {
+    throw new Error("The review stopped because the second signal pass did not return a signal.");
+  }
   const unit = scoreUnit(answers.conviction?.score);
-  const conviction = unit == null
-    ? null
-    : Math.round(Math.min(0.9, Math.max(0.28, 0.32 + unit * 0.56)) * 100) / 100;
+  if (unit == null) {
+    throw new Error("The review stopped because the second signal pass did not return a conviction.");
+  }
+  const conviction = Math.round(Math.min(0.9, Math.max(0.28, 0.32 + unit * 0.56)) * 100) / 100;
   const axes = EVAL_AXES.flatMap((axis) => {
     const raw = answers[axis.key];
     const placed = scoreUnit(raw && typeof raw === "object" ? raw.score : undefined);
     return placed == null ? [] : [{ key: axis.key, label: axis.label, score: Math.round(placed * 100) }];
   });
-  return { finalSignal, synthesisSignal: synthesisWord, conviction, axes };
+  return { finalSignal: choice as Verdict, synthesisSignal: synthesisWord, conviction, axes };
 }
 
 async function webSearch(query: string): Promise<string> {
@@ -2318,6 +2320,8 @@ ${memoryText || "(none yet)"}`,
     const why = clipText(synth.score_reasons?.[key], 220);
     return `${label}: ${Number.isFinite(value) ? Math.round(value) : "—"}/100. ${why}`;
   }).join("\n");
+  step("verdict").detail = "Second pass on the signal";
+  await setProgress(supabase, pitchId, steps, artifacts);
   const jev = await jevSecondPass(
     {
       brief: brief.brief,
@@ -2328,21 +2332,13 @@ ${memoryText || "(none yet)"}`,
     },
     synthesisWord,
   );
-  const verdict: Verdict = jev?.finalSignal ?? synthesisWord;
-  const confidence = jev?.conviction ?? calibrateConfidence(
-    verdict,
-    synth.confidence,
-    redFlags,
-    scores,
-    evidence,
-  );
-  if (jev?.axes.length) {
-    artifacts.jev = {
-      from: jev.synthesisSignal,
-      to: jev.finalSignal,
-      axes: jev.axes,
-    };
-  }
+  const verdict: Verdict = jev.finalSignal;
+  const confidence = jev.conviction;
+  artifacts.jev = {
+    from: jev.synthesisSignal,
+    to: jev.finalSignal,
+    axes: jev.axes,
+  };
 
   const scoreReasons: Record<string, string> = {};
   for (const [k, v] of Object.entries(synth.score_reasons || {})) {
@@ -2557,7 +2553,7 @@ ${founderNote.slice(0, 900)}`,
     .filter((c, i, arr) => c?.name && arr.findIndex((x) => x.name === c.name) === i)
     .slice(0, 5);
 
-  const modelUsed = `${strongModel()} + ${lightModel()}`;
+  const modelUsed = `${strongModel()} + ${lightModel()} + jev-1.13.0`;
 
   const { data: review, error: reviewError } = await supabase
     .from("pitch_reviews")

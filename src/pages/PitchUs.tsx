@@ -608,11 +608,11 @@ const SCORE_LABELS: Record<string, string> = {
 };
 
 function JevRead({ jev }: { jev: NonNullable<Artifacts["jev"]> }) {
-  const moved = jev.from && jev.to && jev.from !== jev.to;
-  if (!moved) return null;
+  if (!jev.from || !jev.to) return null;
+  const moved = jev.from !== jev.to;
   return (
     <p className="mt-4 text-sm text-white/55">
-      Signal moved from {jev.from} to {jev.to}
+      {moved ? `Signal moved from ${jev.from} to ${jev.to}` : `Signal held at ${jev.to}`}
     </p>
   );
 }
