@@ -27,3 +27,7 @@ supabase/.temp/
 
 # Confidential Pitch Doctor rubrics (never commit)
 supabase/secrets/
+
+# Local pitch evals. Not part of the published app.
+eval/
+evals/

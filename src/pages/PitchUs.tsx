@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, Paperclip, Link2, Loader2, AlertTriangle, X, ChevronDown, Video } from "lucide-react";
+import { ArrowRight, Paperclip, Loader2, AlertTriangle, X, ChevronDown, Video } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -284,10 +284,53 @@ const EVIDENCE_BADGE: Record<EvidenceRow["status"], { label: string; cls: string
   unknown: { label: "Unverified", cls: "border-muted-foreground/40 bg-muted/40 text-muted-foreground" },
 };
 
-/** Where a claim was checked — full materials, not brief alone. */
-function materialSourceLabel(source?: string): string {
+function figureWasSpoken(claim: string, spoken: string): boolean {
+  if (!spoken.trim()) return false;
+  const compact = spoken.toLowerCase().replace(/[\s,]/g, "");
+  const tokens = claim.match(/(?:[$€£]\s?\d[\d.,]*|\d[\d.,]*\s?%|\d[\d.,]*\s?x\b|\d[\d.,]*\s?(?:k|m|bn|b)\b)/gi) || [];
+  return tokens.some((token) => compact.includes(token.toLowerCase().replace(/[\s,]/g, "")));
+}
+
+function labelFromNumberSlides(
+  claim: string,
+  numbers?: Array<{ value: string; slide: string }>,
+): string | null {
+  if (!numbers?.length) return null;
+  const tokens = (claim.match(/(?:[$€£]\s?\d[\d.,]*|\d[\d.,]*\s?%|\d[\d.,]*\s?x\b|\d[\d.,]*\s?(?:k|m|bn|b)\b)/gi) || [])
+    .map((token) => token.toLowerCase().replace(/[\s,]/g, ""))
+    .filter((token) => token.length >= 2);
+  if (!tokens.length) return null;
+  const hits = numbers.filter((row) => {
+    const value = row.value.toLowerCase().replace(/[\s,]/g, "");
+    return tokens.some((token) => {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(?:^|\\D)${escaped}(?:\\D|$)`).test(value);
+    });
+  });
+  if (!hits.length) return null;
+  const spoken = hits.some((row) => /live pitch/i.test(row.slide));
+  const deck = hits.some((row) => /\b(s\d+|deck|chart)\b/i.test(row.slide));
+  if (deck && spoken) return "Deck + pitch";
+  if (deck) return "Deck";
+  return null;
+}
+
+/** Where a claim was checked. A deck slide wins over a spoken label. */
+function materialSourceLabel(
+  source?: string,
+  claim = "",
+  opts?: { deckAttached?: boolean; spoken?: string },
+): string {
   const s = String(source || "").toLowerCase();
   if (!s) return "Materials";
+  const deck = !!opts?.deckAttached;
+  const said = figureWasSpoken(claim, opts?.spoken || "");
+  if (/live pitch/.test(s) && /\b(deck|slide|s\d+|chart)\b/.test(s)) return "Deck + pitch";
+  if (/live pitch/.test(s)) {
+    if (deck && said) return "Deck + pitch";
+    if (deck) return "Deck";
+    return "Live pitch";
+  }
   if (/chart/.test(s)) return "Chart";
   if (/\b(deck|slide|ppt|pdf|s\d+)\b/.test(s)) return "Deck";
   if (/website|site\b/.test(s)) return "Website";
@@ -307,7 +350,15 @@ function findEvidenceForClaim(claim: string, evidence: EvidenceRow[]): EvidenceR
   );
 }
 
-function ClaimChips({ artifacts }: { artifacts: Artifacts }) {
+function ClaimChips({
+  artifacts,
+  deckAttached,
+  spoken,
+}: {
+  artifacts: Artifacts;
+  deckAttached?: boolean;
+  spoken?: string;
+}) {
   const claims = artifacts.claims || [];
   if (!claims.length) return null;
   const evidence = artifacts.evidence || [];
@@ -323,7 +374,10 @@ function ClaimChips({ artifacts }: { artifacts: Artifacts }) {
         {claims.map((c, i) => {
           const ev = findEvidenceForClaim(c.claim, evidence);
           const badge = ev ? EVIDENCE_BADGE[ev.status] : null;
-          const src = ev ? materialSourceLabel(ev.source) : null;
+          const recordedDeck = deckAttached || /deck attached|pitch deck/i.test(artifacts.deck_note || "");
+          const src = ev
+            ? labelFromNumberSlides(c.claim, artifacts.numbers) || materialSourceLabel(ev.source, c.claim, { deckAttached: recordedDeck, spoken })
+            : null;
           return (
             <span
               key={i}
@@ -354,11 +408,15 @@ function ThoughtStream({
   artifacts,
   outputReady = false,
   onReadyToReveal,
+  deckAttached = false,
+  spoken = "",
 }: {
   progress: ProgressStep[];
   artifacts: Artifacts;
   outputReady?: boolean;
   onReadyToReveal?: () => void;
+  deckAttached?: boolean;
+  spoken?: string;
 }) {
   const revealedRef = useRef(false);
   const steps = progress.length ? progress : INITIAL_STEPS;
@@ -479,7 +537,7 @@ function ThoughtStream({
                   )}
                 </div>
               )}
-              {showClaims && <ClaimChips artifacts={artifacts} />}
+              {showClaims && <ClaimChips artifacts={artifacts} deckAttached={deckAttached} spoken={spoken} />}
               {teaser && (
                 <p className="mt-2 animate-fade-in pl-8 text-sm leading-relaxed text-white/55">
                   {s.id === "skeptic" ? teaser : `“${teaser}”`}
@@ -801,7 +859,7 @@ function NumberTable({ numbers }: { numbers: NonNullable<Artifacts["numbers"]> }
   if (!numbers.length) return null;
   return (
     <div>
-      <div className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] gap-x-4 pb-1">
+      <div className="grid grid-cols-[6.5rem_minmax(0,1fr)_auto] gap-x-4 pb-1">
         <p className="text-[10px] uppercase tracking-[0.16em] text-white/30">Slide</p>
         <p className="text-[10px] uppercase tracking-[0.16em] text-white/30">Metric</p>
         <p className="text-right text-[10px] uppercase tracking-[0.16em] text-white/30">Value</p>
@@ -809,7 +867,7 @@ function NumberTable({ numbers }: { numbers: NonNullable<Artifacts["numbers"]> }
       {numbers.map((row, i) => (
         <div
           key={`${row.slide}-${row.metric}-${i}`}
-          className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-baseline gap-x-4 border-t border-white/10 py-2"
+          className="grid grid-cols-[6.5rem_minmax(0,1fr)_auto] items-baseline gap-x-4 border-t border-white/10 py-2"
         >
           <p className="truncate text-xs text-white/40">{row.slide}</p>
           <p className="min-w-0 text-sm text-white/80">{row.metric}</p>
@@ -844,7 +902,19 @@ function evidenceSummary(evidence: EvidenceRow[]): string {
   return parts.join(" · ") || "No claims checked";
 }
 
-function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
+function EvidencePanel({
+  evidence,
+  numbers,
+  deckNote,
+  deckAttached,
+  spoken,
+}: {
+  evidence: EvidenceRow[];
+  numbers?: Array<{ value: string; slide: string }>;
+  deckNote?: string;
+  deckAttached?: boolean;
+  spoken?: string;
+}) {
   const [open, setOpen] = useState<number | null>(null);
   if (!evidence.length) return null;
   return (
@@ -863,7 +933,7 @@ function EvidencePanel({ evidence }: { evidence: EvidenceRow[] }) {
             <div className="flex items-baseline gap-3">
               <span className={cn("w-[6.75rem] shrink-0 text-xs", tone)}>{label}</span>
               <span className="min-w-0 flex-1 text-sm text-white">{e.claim}</span>
-              <span className="hidden shrink-0 text-xs text-white/40 sm:inline">{materialSourceLabel(e.source)}</span>
+              <span className="hidden shrink-0 text-xs text-white/40 sm:inline">{labelFromNumberSlides(e.claim, numbers) || materialSourceLabel(e.source, e.claim, { deckAttached: deckAttached || /deck attached|pitch deck/i.test(deckNote || ""), spoken })}</span>
               <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 text-white/40 transition-transform", expanded && "rotate-180")} />
             </div>
             {expanded && (
@@ -944,6 +1014,330 @@ function ConvictionBlock({
 /* ── Live pitch recorder ───────────────────────────────────────────────────── */
 
 const LIVE_MAX_SEC = 180;
+const MIC_BARS = 28;
+
+const HEARD_AXES: Array<{ label: string; groups: RegExp[]; need: number; anchor?: number }> = [
+  {
+    label: "Problem clarity",
+    need: 2,
+    anchor: 0,
+    groups: [
+      /\b(problem|pain|painful|pain point|struggle|struggling|broken|frustrat\w*|waste|wasting|wastes|stuck|manual|spreadsheet|tedious|headache|nightmare|too (?:slow|hard|long|manual))\b/,
+      /\b(customers?|users?|buyers?|teams?|founders?|patients?|clinics?|sellers?|operators?|managers?|nurses?|doctors?|merchants?|businesses|companies|people|shops|hospitals|schools)\b/,
+      /\b(hours?|every (day|week|month)|can(?:not|'t)|unable|lose|losing|lost|costly|expensive|errors?|too long|too much|their time|the time)\b/,
+    ],
+  },
+  {
+    label: "Solution leverage",
+    need: 2,
+    anchor: 0,
+    groups: [
+      /\b(we (?:built|build|make|made|launched|help|sell)|our (?:product|platform|app|software|tool|solution)|the (?:product|app|platform)|it lets|we let)\b/,
+      /\b(it works|how it works|automatically|workflow|instead|replaces|cuts|saves|one click|so they can|helps them|lets them)\b/,
+      /\b(faster|less time|fewer|reduces|reduction|down to|in minutes|in seconds)\b/,
+    ],
+  },
+  {
+    label: "Market realism",
+    need: 2,
+    anchor: 0,
+    groups: [
+      /\b(market|industry|category|tam|sam|som|segment|the space)\b/,
+      /\b(\d[\d,.]*\s?(?:billion|million|percent|%)|billion|million|percent|growing|why now|regulation|switching|how big)\b/,
+      /\b(they (?:buy|pay|switch|adopt)|willingness|who buys|our buyer|buyers are)\b/,
+    ],
+  },
+  {
+    label: "Team signal",
+    need: 2,
+    groups: [
+      /\b(co-?founders?|founding team|i(?:'m| am) the founder|we are the founders|my background|our background|our team|my team)\b/,
+      /\b(previously|before this|former|years|spent|led|founded|head of|operator|worked|experience|second[- ]time)\b/,
+    ],
+  },
+  {
+    label: "Opportunities & threats",
+    need: 2,
+    groups: [
+      /\b(competitors?|competition|compete|incumbents?|alternative|instead of|status quo|versus|vs\.?|today they)\b/,
+      /\b(regulations?|regulat\w*|threats?|risks?|mandates?|required to|compliance|if they stay|if nothing changes)\b/,
+      /\b(why now|tailwind|for the first time|opening|the shift|this year)\b/,
+    ],
+  },
+  {
+    label: "Financial discipline",
+    need: 2,
+    groups: [
+      /\b(mrr|arr|revenue|margins?|burn|runway|cac|ltv|payback|forecasts?|projections?|churn|nrr|gmv|take rate|gross|a month|per month|monthly|profit|sales)\b/,
+      /(?:\$\s?\d|\b(?:million|thousand|billion|percent|dollars)\b|\b\d[\d,.]*\s?(?:%|k|m|bn)\b|\b(?:mrr|arr|margin|burn|runway|revenue)\b[^.]{0,24}\d|\d[^.]{0,16}\b(?:mrr|arr|margin|burn|runway|revenue|month)\b)/,
+    ],
+  },
+  {
+    label: "The ask",
+    need: 2,
+    groups: [
+      /\b(raising|raise|fundraising|the ask|looking to raise|looking for|want to raise|our raise)\b/,
+      /\b(seed|pre-seed|series|million|round|capital|\$\s?\d|\d+\s?(?:k|m)\b)\b/,
+    ],
+  },
+  {
+    label: "Use of funds",
+    need: 2,
+    groups: [
+      /\b(use of funds|usage of funds|proceeds|we'll spend|we will spend|we'll use|we will use|allocat\w*|the (?:money|capital|round|raise) (?:goes|will go|is for)|spend(?:ing)? (?:it|the round|the raise) on|put (?:it|the raise|the round) (?:into|toward))\b/,
+      /\b(hir\w+|engineering|sales|marketing|runway|inventory|headcount)\b/,
+    ],
+  },
+];
+
+function speechWindows(text: string) {
+  const clean = text.toLowerCase().replace(/[“”]/g, "\"").replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const sentences = clean.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.split(/\s+/).length >= 4);
+  const words = clean.split(/\s+/);
+  const slides: string[] = [];
+  for (let i = 0; i < words.length; i += 12) {
+    const slice = words.slice(i, i + 24);
+    if (slice.length >= 4) slides.push(slice.join(" "));
+    if (i + 24 >= words.length) break;
+  }
+  return sentences.length ? [...sentences, ...slides] : slides;
+}
+
+function axisLanded(text: string, groups: RegExp[], need: number, anchor?: number) {
+  return speechWindows(text).some((window) => {
+    const hits = groups.map((group) => group.test(window));
+    const count = hits.filter(Boolean).length;
+    if (count < need) return false;
+    return anchor == null || hits[anchor];
+  });
+}
+
+function ventureLanded(text: string, company: string) {
+  const clean = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (clean.split(/\s+/).filter(Boolean).length < 4) return false;
+  const name = company.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const generic = /^(the|and|for|inc|llc|app|team|seed)$/.test(name);
+  if (name.length > 2 && !generic && clean.includes(name)) return true;
+  return /\b((?:we(?:'re| are)|i(?:'m| am)|this is|it(?:'s| is)|the company is|our (?:startup|company|venture) is) called|called [a-z]{3,}|our (?:startup|company|venture) is [a-z]{3,}|the company is [a-z]{3,})\b/.test(clean);
+}
+
+function heardLabels(text: string, company: string) {
+  if (!text.trim()) return [];
+  const labels = HEARD_AXES.filter((axis) => axisLanded(text, axis.groups, axis.need, axis.anchor)).map((axis) => axis.label);
+  if (ventureLanded(text, company)) labels.unshift("Venture name");
+  return labels;
+}
+
+const RHETORIC_PAIN = HEARD_AXES[0].groups[0];
+const RHETORIC_WHO = HEARD_AXES[0].groups[1];
+const RHETORIC_STAKE = HEARD_AXES[0].groups[2];
+const RHETORIC_HISTORY = HEARD_AXES[3].groups[0];
+const RHETORIC_CRAFT = HEARD_AXES[3].groups[1];
+const RHETORIC_TRUST = /\b(paying|signed|pilot|retention|trusted)\b/;
+const RHETORIC_BUILT = HEARD_AXES[1].groups[0];
+const RHETORIC_MECHANISM = HEARD_AXES[1].groups[1];
+const RHETORIC_MARKET = HEARD_AXES[2].groups[0];
+const RHETORIC_SHAPE = HEARD_AXES[2].groups[1];
+const RHETORIC_METRIC = HEARD_AXES[5].groups[0];
+const RHETORIC_FIGURE = HEARD_AXES[5].groups[1];
+const RHETORIC_RAISE = HEARD_AXES[6].groups[0];
+const RHETORIC_ROUND = HEARD_AXES[6].groups[1];
+const RHETORIC_FUNDS = HEARD_AXES[7].groups[0];
+const RHETORIC_USE = HEARD_AXES[7].groups[1];
+
+function rhetoricWindows(text: string) {
+  const clean = text.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const sentences = clean.split(/(?<=[.!?])\s+/).map((part) => part.trim()).filter((part) => part.split(/\s+/).length >= 4);
+  if (sentences.length >= 2) return sentences;
+  const words = clean.split(/\s+/);
+  const slides: string[] = [];
+  for (let i = 0; i < words.length; i += 16) {
+    const slice = words.slice(i, i + 22);
+    if (slice.length >= 4) slides.push(slice.join(" "));
+    if (i + 22 >= words.length) break;
+  }
+  return slides;
+}
+
+function rhetoricPrelim(text: string, company: string) {
+  let pathos = 0;
+  let ethos = 0;
+  let logos = 0;
+  for (const window of rhetoricWindows(text)) {
+    const pain = RHETORIC_PAIN.test(window);
+    const who = RHETORIC_WHO.test(window);
+    const stake = RHETORIC_STAKE.test(window);
+    const pathosGroups = [pain, who, stake].filter(Boolean).length;
+    if (pain && pathosGroups >= 2) pathos += 1;
+    else if (who && stake) pathos += 0.85;
+    else if (pain) pathos += 0.22;
+
+    const ethosGroups = [
+      RHETORIC_HISTORY.test(window),
+      RHETORIC_CRAFT.test(window),
+      RHETORIC_TRUST.test(window),
+      ventureLanded(window, company),
+    ].filter(Boolean).length;
+    if (ethosGroups >= 2) ethos += 1;
+    else if (ethosGroups === 1) ethos += 0.25;
+
+    const pillars = [
+      RHETORIC_BUILT.test(window) && RHETORIC_MECHANISM.test(window),
+      RHETORIC_MARKET.test(window) && RHETORIC_SHAPE.test(window),
+      RHETORIC_METRIC.test(window) && RHETORIC_FIGURE.test(window),
+      RHETORIC_RAISE.test(window) && RHETORIC_ROUND.test(window),
+      RHETORIC_FUNDS.test(window) && RHETORIC_USE.test(window),
+    ].filter(Boolean).length;
+    if (pillars >= 1) logos += 1;
+    else if (RHETORIC_BUILT.test(window) || RHETORIC_MARKET.test(window) || RHETORIC_METRIC.test(window) || RHETORIC_RAISE.test(window)) logos += 0.2;
+  }
+  const rise = (weight: number) => (weight <= 0 ? 0 : Math.min(0.84, 1 - Math.exp(-weight / 1.7)));
+  return { pathos: rise(pathos), ethos: rise(ethos), logos: rise(logos) };
+}
+
+function useSpokenText(active: boolean) {
+  const [text, setText] = useState("");
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    if (!active) {
+      setText("");
+      return;
+    }
+    const Ctor = (window as unknown as {
+      SpeechRecognition?: new () => {
+        continuous: boolean;
+        interimResults: boolean;
+        lang: string;
+        onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        continuous: boolean;
+        interimResults: boolean;
+        lang: string;
+        onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+      };
+    }).SpeechRecognition || (window as unknown as { webkitSpeechRecognition?: new () => {
+      continuous: boolean;
+      interimResults: boolean;
+      lang: string;
+      onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+      onend: (() => void) | null;
+      start: () => void;
+      stop: () => void;
+    } }).webkitSpeechRecognition;
+    if (!Ctor) return;
+    const rec = new Ctor();
+    rec.continuous = true;
+    rec.interimResults = true;
+    let saved = "";
+    rec.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const piece = event.results[i][0]?.transcript || "";
+        if (event.results[i].isFinal) saved = `${saved} ${piece}`.trim();
+        else interim += piece;
+      }
+      setText(`${saved} ${interim}`.trim());
+    };
+    rec.onend = () => {
+      if (!activeRef.current) return;
+      window.setTimeout(() => {
+        if (!activeRef.current) return;
+        try { rec.start(); } catch { /* already running */ }
+      }, 250);
+    };
+    try { rec.start(); } catch { /* mic is already open for the take */ }
+    return () => {
+      activeRef.current = false;
+      rec.onend = null;
+      try { rec.stop(); } catch { /* already stopped */ }
+    };
+  }, [active]);
+  return text;
+}
+
+function useGlide3(target: [number, number, number]) {
+  const [value, setValue] = useState<[number, number, number]>([0, 0, 0]);
+  const valueRef = useRef<[number, number, number]>([0, 0, 0]);
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  useEffect(() => {
+    let frame = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const k = 1 - Math.exp(-dt * 3.4);
+      const next = valueRef.current.map((current, index) => {
+        const goal = targetRef.current[index];
+        return Math.abs(goal - current) < 0.004 ? goal : current + (goal - current) * k;
+      }) as [number, number, number];
+      valueRef.current = next;
+      setValue(next);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return value;
+}
+
+function RhetoricMeters({ text, company }: { text: string; company: string }) {
+  const target = rhetoricPrelim(text, company);
+  const [pathos, ethos, logos] = useGlide3([target.pathos, target.ethos, target.logos]);
+  const meters = [
+    { label: "Pathos", hint: "Why it matters", value: pathos },
+    { label: "Ethos", hint: "Why you", value: ethos },
+    { label: "Logos", hint: "Why it holds", value: logos },
+  ];
+  return (
+    <div className="mt-4 w-full max-w-lg">
+      <p className="text-center text-[10px] uppercase tracking-[0.22em] text-white/35">Prelim · the full read comes after</p>
+      <div className="mt-4 space-y-3">
+        {meters.map((meter) => (
+          <div key={meter.label} className="grid grid-cols-[7.5rem_1fr] items-center gap-4">
+            <div>
+              <p className="text-sm text-white">{meter.label}</p>
+              <p className="text-[10px] uppercase tracking-[0.16em] text-white/35">{meter.hint}</p>
+            </div>
+            <div className="relative h-1.5 rounded-full bg-white/15">
+              <div
+                className="absolute inset-y-0 left-0 rounded-full bg-primary"
+                style={{
+                  width: `${meter.value * 100}%`,
+                  boxShadow: meter.value > 0.04 ? "0 0 16px hsl(192 92% 64% / 0.9)" : undefined,
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HeardTicks({ labels }: { labels: string[] }) {
+  if (!labels.length) return null;
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-2">
+      {labels.map((label) => (
+        <span key={label} className="inline-flex items-center gap-2 text-sm text-white/80 animate-fade-in">
+          <span className="text-primary">✓</span>
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function formatClock(total: number) {
   const m = Math.floor(total / 60);
@@ -952,27 +1346,35 @@ function formatClock(total: number) {
 }
 
 function useMicLevel(stream: MediaStream | null, active: boolean) {
-  const [level, setLevel] = useState(0);
+  const [mic, setMic] = useState({ level: 0, bars: Array.from({ length: MIC_BARS }, () => 0) });
   useEffect(() => {
     if (!stream || !active) {
-      setLevel(0);
+      setMic({ level: 0, bars: Array.from({ length: MIC_BARS }, () => 0) });
       return;
     }
     const ctx = new AudioContext();
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
+    analyser.fftSize = 256;
     source.connect(analyser);
-    const data = new Uint8Array(analyser.fftSize);
+    const wave = new Uint8Array(analyser.fftSize);
+    const freq = new Uint8Array(analyser.frequencyBinCount);
     let frame = 0;
     const tick = () => {
-      analyser.getByteTimeDomainData(data);
+      analyser.getByteTimeDomainData(wave);
+      analyser.getByteFrequencyData(freq);
       let sum = 0;
-      for (let i = 0; i < data.length; i += 1) {
-        const v = (data[i] - 128) / 128;
+      for (let i = 0; i < wave.length; i += 1) {
+        const v = (wave[i] - 128) / 128;
         sum += v * v;
       }
-      setLevel(Math.min(1, Math.sqrt(sum / data.length) * 4));
+      const step = Math.max(1, Math.floor(freq.length / MIC_BARS));
+      const bars = Array.from({ length: MIC_BARS }, (_, i) => {
+        let peak = 0;
+        for (let j = 0; j < step; j += 1) peak += freq[i * step + j] || 0;
+        return Math.min(1, peak / step / 150);
+      });
+      setMic({ level: Math.min(1, Math.sqrt(sum / wave.length) * 4), bars });
       frame = requestAnimationFrame(tick);
     };
     void ctx.resume().then(tick);
@@ -982,7 +1384,7 @@ function useMicLevel(stream: MediaStream | null, active: boolean) {
       void ctx.close();
     };
   }, [stream, active]);
-  return level;
+  return mic;
 }
 
 function LivePitchRecorder({
@@ -1002,7 +1404,9 @@ function LivePitchRecorder({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
+  const cutoffRef = useRef<number | null>(null);
   const startedRef = useRef(false);
+  const stoppingRef = useRef(false);
   const secondsRef = useRef(0);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [mode, setMode] = useState<"idle" | "countdown" | "recording" | "saving" | "error">("idle");
@@ -1012,7 +1416,10 @@ function LivePitchRecorder({
   const [blob, setBlob] = useState<Blob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
-  const level = useMicLevel(stream, mode === "countdown");
+  const { bars } = useMicLevel(stream, mode === "countdown" || mode === "recording");
+  const spoken = useSpokenText(mode === "recording");
+  const liveSaid = heardLabels(spoken, companyName);
+  const savedSaid = heardLabels(transcript, companyName);
 
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -1022,7 +1429,9 @@ function LivePitchRecorder({
 
   const stopTimer = () => {
     if (timerRef.current) window.clearInterval(timerRef.current);
+    if (cutoffRef.current) window.clearTimeout(cutoffRef.current);
     timerRef.current = null;
+    cutoffRef.current = null;
   };
 
   useEffect(() => () => {
@@ -1032,23 +1441,47 @@ function LivePitchRecorder({
 
   const openCamera = async () => {
     if (streamRef.current) return streamRef.current;
-    try {
-      const next = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: true,
-      });
-      streamRef.current = next;
-      setStream(next);
-      return next;
-    } catch {
-      toast({
-        title: "Camera unavailable",
-        description: "Allow camera and microphone to record a live pitch.",
-        variant: "destructive",
-      });
-      setMode("idle");
+    const fail = (title: string, description: string) => {
+      setError(description);
+      setMode("error");
+      toast({ title, description, variant: "destructive" });
       return null;
+    };
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      return fail(
+        "Camera needs a secure page",
+        "Open this app at http://localhost:8080. A network address cannot use the camera.",
+      );
     }
+    const attempts: MediaStreamConstraints[] = [
+      { video: { facingMode: { ideal: "user" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true },
+      { video: true, audio: true },
+      { video: true, audio: false },
+    ];
+    let lastError: unknown;
+    for (const constraints of attempts) {
+      try {
+        const next = await navigator.mediaDevices.getUserMedia(constraints);
+        streamRef.current = next;
+        setStream(next);
+        return next;
+      } catch (error) {
+        lastError = error;
+        const name = error instanceof DOMException ? error.name : "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") break;
+      }
+    }
+    const name = lastError instanceof DOMException ? lastError.name : "";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      return fail(
+        "Mac is blocking the camera",
+        "System Settings → Privacy & Security → Camera, and Microphone. Allow the browser you are using, reload this page, then press Record.",
+      );
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return fail("No camera found", "This Mac has no camera the browser can use.");
+    }
+    return fail("Camera unavailable", "The browser could not open the camera. Reload and press Record again.");
   };
 
   const transcribe = async (next: Blob) => {
@@ -1057,14 +1490,15 @@ function LivePitchRecorder({
     try {
       const ext = next.type.includes("mp4") ? "mp4" : "webm";
       const path = `${crypto.randomUUID()}.${ext}`;
-      const contentType = ext === "mp4" ? "video/mp4" : "video/webm";
-      const { error: uploadError } = await supabase.storage.from("pitch-materials").upload(path, next, {
-        contentType,
+      const storageType = ext === "mp4" ? "video/mp4" : "video/webm";
+      const file = new File([next], `live-pitch.${ext}`, { type: storageType });
+      const { error: uploadError } = await supabase.storage.from("pitch-materials").upload(path, file, {
+        contentType: storageType,
         upsert: false,
       });
       if (uploadError) throw uploadError;
       const { data, error: invokeError } = await supabase.functions.invoke("transcribe-live-pitch", {
-        body: { file_path: path, file_name: `live-pitch.${ext}`, file_mime: contentType },
+        body: { file_path: path, file_name: file.name, file_mime: storageType },
       });
       if (invokeError) throw new Error(invokeError.message || "Transcription failed");
       if (data?.error) throw new Error(String(data.error));
@@ -1081,9 +1515,11 @@ function LivePitchRecorder({
   };
 
   const finishRecording = () => {
+    if (stoppingRef.current) return;
     if (startedRef.current === false && recorderRef.current == null) return;
+    stoppingRef.current = true;
     stopTimer();
-    setTakenSeconds(secondsRef.current);
+    setTakenSeconds(Math.min(LIVE_MAX_SEC, secondsRef.current));
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") rec.stop();
     else setMode("saving");
@@ -1094,12 +1530,17 @@ function LivePitchRecorder({
     if (!live || startedRef.current) return;
     startedRef.current = true;
     chunksRef.current = [];
-    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
-      ? "video/webm;codecs=vp9,opus"
-      : MediaRecorder.isTypeSupported("video/webm")
-        ? "video/webm"
-        : "";
-    const rec = new MediaRecorder(live, mime ? { mimeType: mime } : undefined);
+    const audioTracks = live.getAudioTracks();
+    const speechStream = audioTracks.length ? new MediaStream(audioTracks) : live;
+    const mime = (audioTracks.length
+      ? ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+      : ["video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+    ).find((type) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type)) || "";
+    const rec = new MediaRecorder(speechStream, mime
+      ? audioTracks.length
+        ? { mimeType: mime, audioBitsPerSecond: 64000 }
+        : { mimeType: mime, videoBitsPerSecond: 700_000, audioBitsPerSecond: 64000 }
+      : undefined);
     recorderRef.current = rec;
     rec.ondataavailable = (e) => {
       if (e.data.size) chunksRef.current.push(e.data);
@@ -1113,21 +1554,23 @@ function LivePitchRecorder({
       void transcribe(next);
     };
     rec.start(1000);
+    const startedAt = Date.now();
     setSeconds(0);
+    secondsRef.current = 0;
     setMode("recording");
     onTranscript("");
+    cutoffRef.current = window.setTimeout(() => finishRecording(), LIVE_MAX_SEC * 1000);
     timerRef.current = window.setInterval(() => {
-      setSeconds((n) => {
-        const next = Math.min(LIVE_MAX_SEC, n + 1);
-        secondsRef.current = next;
-        if (next >= LIVE_MAX_SEC) finishRecording();
-        return next;
-      });
-    }, 1000);
+      const elapsed = Math.min(LIVE_MAX_SEC, Math.floor((Date.now() - startedAt) / 1000));
+      secondsRef.current = elapsed;
+      setSeconds(elapsed);
+      if (elapsed >= LIVE_MAX_SEC) finishRecording();
+    }, 250);
   };
 
   const begin = async () => {
     startedRef.current = false;
+    stoppingRef.current = false;
     setError(null);
     setCountdown(null);
     setMode("countdown");
@@ -1144,6 +1587,7 @@ function LivePitchRecorder({
     stopTimer();
     stopStream();
     startedRef.current = false;
+    stoppingRef.current = false;
     setCountdown(null);
     setMode(transcript ? "idle" : "idle");
   };
@@ -1180,89 +1624,272 @@ function LivePitchRecorder({
   const onStage = mode !== "idle";
 
   return (
-    <div>
-      <div className="pitch-row">
-        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", transcript ? "bg-primary" : "bg-white/25")} />
-        <span className="min-w-0 flex-1">
-          <span className="block text-[15px] text-white">Live pitch</span>
-          <span className="block text-xs text-white/40">{transcript ? formatClock(takenSeconds) : "Camera, 3 minutes"}</span>
-        </span>
-        <button type="button" onClick={transcript ? redo : begin} className="pitch-row-action text-sm text-white/55">
-          {transcript ? "Redo" : "Record"}
-        </button>
-      </div>
-      {transcript && (
-        <div className="border-b border-white/10 pb-4">
-          <button type="button" onClick={() => setTranscriptOpen((open) => !open)} className="text-sm text-white/50 hover:text-white">
-            {transcriptOpen ? "Hide transcript" : "Transcript"}
-          </button>
-          {transcriptOpen && (
-            <p className="mt-3 text-sm leading-relaxed text-white/80">{transcript}</p>
+    <>
+      <div className="flex h-full items-center gap-4 px-5 py-4 md:px-6 md:py-5 md:pr-14">
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] uppercase tracking-[0.22em] text-white/35">01</p>
+          <h2 className="mt-1 text-xl font-medium tracking-tight text-white">Live pitch</h2>
+          <p className="mt-1 truncate text-sm text-white/45">
+            {transcript ? `${formatClock(takenSeconds)} captured` : "3 minutes · the picture stays here"}
+          </p>
+          {transcript && transcriptOpen && (
+            <div className="mt-3">
+              {savedSaid.length > 0 && <HeardTicks labels={savedSaid} />}
+              <p className={cn("text-sm leading-relaxed text-white/70", savedSaid.length > 0 && "mt-3")}>{transcript}</p>
+            </div>
           )}
         </div>
-      )}
+        <div className="flex shrink-0 items-center gap-4">
+          {transcript && (
+            <button type="button" onClick={() => setTranscriptOpen((open) => !open)} className="text-sm text-white/40 hover:text-white">
+              {transcriptOpen ? "Hide" : "Transcript"}
+            </button>
+          )}
+          <button type="button" onClick={transcript ? redo : begin} className="text-sm text-primary hover:text-white">
+            {transcript ? "Redo" : "Record"}
+          </button>
+        </div>
+      </div>
 
       {onStage && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black px-6 text-white">
-          <div className="flex items-start justify-between pt-8">
-            <div>
-              {founderName.trim() && <p className="text-sm text-white/45">{founderName.trim()}</p>}
-              <p className="mt-1 text-2xl font-medium tracking-tight">{companyName.trim() || "Live pitch"}</p>
+        <div className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-black text-white">
+          <header className="grid shrink-0 grid-cols-3 items-center px-6 pb-2 pt-4 md:px-10">
+            <div className="flex items-center gap-3">
+              <span className={cn("h-1.5 w-1.5 rounded-full", mode === "recording" ? "animate-pulse bg-primary" : "bg-white/30")} />
+              <span className="text-[11px] uppercase tracking-[0.22em] text-white/50">{mode === "recording" ? "Live" : "Ready"}</span>
             </div>
-            {mode === "countdown" && (
-              <button type="button" onClick={leave} className="text-sm text-white/45 hover:text-white">Close</button>
-            )}
-          </div>
-          <div className="flex flex-1 flex-col items-center justify-center">
-            <div className="relative w-full max-w-3xl">
-              <svg className="pointer-events-none absolute -inset-3 h-[calc(100%+1.5rem)] w-[calc(100%+1.5rem)]" viewBox="0 0 160 90" preserveAspectRatio="none" aria-hidden>
-                <rect
-                  x="1.2"
-                  y="1.2"
-                  width="157.6"
-                  height="87.6"
-                  rx="2"
-                  fill="none"
-                  stroke={warm && mode === "recording" ? "hsl(28 90% 62%)" : "hsl(192 70% 72%)"}
-                  strokeWidth="0.7"
-                  pathLength={ring}
-                  strokeDasharray={ring}
-                  strokeDashoffset={mode === "recording" ? ring * (seconds / LIVE_MAX_SEC) : 0}
-                />
-              </svg>
-              <video ref={videoRef} muted playsInline className={cn("aspect-video w-full bg-black object-cover", mode === "saving" || mode === "error" ? "invisible" : "-scale-x-100")} />
-              {mode === "countdown" && countdown != null && countdown > 0 && (
-                <div className="absolute inset-0 grid place-items-center text-7xl font-medium tabular-nums">{countdown}</div>
+            <p className="truncate text-center text-sm text-white/75">{companyName.trim() || founderName.trim() || "Live pitch"}</p>
+            <div className="text-right">
+              {mode === "countdown" && (
+                <button type="button" onClick={leave} className="text-sm text-white/45 hover:text-white">Close</button>
               )}
               {mode === "recording" && (
-                <p className="absolute right-4 top-4 text-sm tabular-nums text-white/80">{formatClock(seconds)}</p>
+                <p className={cn("text-sm tabular-nums", warm ? "text-[hsl(28_90%_68%)]" : "text-white/70")}>{formatClock(seconds)} / 3:00</p>
               )}
             </div>
-            {mode === "countdown" && (
-              <div className="mt-8 flex h-6 items-end gap-1" aria-hidden>
-                {Array.from({ length: 18 }, (_, i) => {
-                  const dist = Math.abs(i - 8.5) / 8.5;
-                  const height = Math.max(0.15, level * (1 - dist * 0.7));
-                  return <span key={i} className="w-px bg-white/80" style={{ height: `${height * 24}px` }} />;
-                })}
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-8 md:px-10">
+            <div className="mx-auto flex w-full max-w-3xl flex-col items-center">
+              <div className="relative mx-auto w-fit max-w-full">
+                <svg className="pointer-events-none absolute -inset-2 h-[calc(100%+1rem)] w-[calc(100%+1rem)]" viewBox="0 0 160 90" preserveAspectRatio="none" aria-hidden>
+                  <rect
+                    x="1.2"
+                    y="1.2"
+                    width="157.6"
+                    height="87.6"
+                    rx="2"
+                    fill="none"
+                    stroke={warm && mode === "recording" ? "hsl(28 90% 62%)" : "hsl(192 70% 72%)"}
+                    strokeWidth="0.7"
+                    pathLength={ring}
+                    strokeDasharray={ring}
+                    strokeDashoffset={mode === "recording" ? ring * (seconds / LIVE_MAX_SEC) : 0}
+                  />
+                </svg>
+                <video ref={videoRef} autoPlay muted playsInline className={cn("mx-auto aspect-video max-h-[34vh] w-auto max-w-full bg-black object-cover", mode === "saving" || mode === "error" ? "invisible" : "-scale-x-100")} />
+                {mode === "countdown" && countdown != null && countdown > 0 && (
+                  <div className="absolute inset-0 grid place-items-center">
+                    <p className="text-7xl font-medium tabular-nums">{countdown}</p>
+                  </div>
+                )}
               </div>
-            )}
-            {mode === "recording" && (
-              <button type="button" onClick={finishRecording} className="mt-8 text-sm text-white/70 hover:text-white">Stop</button>
-            )}
-            {mode === "saving" && <p className="mt-8 text-sm text-white/45">Saving the take</p>}
-            {mode === "error" && (
-              <div className="mt-8 flex items-center gap-6 text-sm">
-                <p className="text-white/50">{error}</p>
-                {blob && <button type="button" onClick={() => void transcribe(blob)} className="text-white">Try again</button>}
-                <button type="button" onClick={leave} className="text-white/45">Close</button>
-              </div>
-            )}
+              {mode === "countdown" && (
+                <p className="mt-4 text-sm text-white/55">Look at the lens.</p>
+              )}
+              {mode === "recording" && <RhetoricMeters text={spoken} company={companyName} />}
+              {mode === "recording" && liveSaid.length > 0 && (
+                <div className="mt-5 flex justify-center"><HeardTicks labels={liveSaid} /></div>
+              )}
+              {(mode === "countdown" || mode === "recording") && (
+                <div className="mt-5 flex h-10 w-full items-end gap-1" aria-hidden>
+                  {bars.map((bar, i) => (
+                    <span key={i} className="min-w-0 flex-1 bg-primary/70" style={{ height: `${Math.max(3, bar * 40)}px` }} />
+                  ))}
+                </div>
+              )}
+              {mode === "recording" && (
+                <button type="button" onClick={finishRecording} className="mt-4 text-sm tracking-wide text-white/80 hover:text-white">Stop</button>
+              )}
+              {mode === "saving" && <p className="mt-8 text-sm text-white/45">Saving the words</p>}
+              {mode === "error" && (
+                <div className="mt-8 flex items-center gap-6 text-sm">
+                  <p className="text-white/50">{error}</p>
+                  {blob && <button type="button" onClick={() => void transcribe(blob)} className="text-white">Try again</button>}
+                  <button type="button" onClick={leave} className="text-white/45">Close</button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
+}
+
+const COUNTRY_NAMES = [
+  "United Arab Emirates", "United Kingdom", "United States", "South Africa", "South Korea", "New Zealand", "Saudi Arabia", "Hong Kong",
+  "Singapore", "India", "Germany", "France", "Spain", "Italy", "Netherlands", "Sweden", "Norway", "Denmark", "Finland", "Switzerland",
+  "Austria", "Belgium", "Ireland", "Portugal", "Poland", "Canada", "Mexico", "Brazil", "Argentina", "Chile", "Colombia", "Australia",
+  "Japan", "China", "Taiwan", "Indonesia", "Malaysia", "Thailand", "Vietnam", "Philippines", "Israel", "Turkey", "Nigeria", "Kenya",
+  "Egypt", "Morocco", "UAE", "UK", "USA",
+];
+
+const COUNTRY_CANON: Record<string, string> = { UAE: "United Arab Emirates", UK: "United Kingdom", USA: "United States" };
+
+const THEME_RULES: Array<[RegExp, string]> = [
+  [/\b(defense|defence|aerospace|satellite|space)\b/i, "Defense & Space"],
+  [/\b(agriculture|farming|agtech|food)\b/i, "Food & Agriculture"],
+  [/\b(climate|renewable|solar|battery|energy)\b/i, "Climate & Energy"],
+  [/\b(cleantech|carbon capture|decarbon)\b/i, "CleanTech"],
+  [/\b(developer tool|devtool|devtools)\b/i, "Developer Tools"],
+  [/\b(cybersecurity|cyber security|infosec)\b/i, "Cybersecurity"],
+  [/\b(fintech|payments|banking|lending|insurtech)\b/i, "Fintech"],
+  [/\b(mobility|autonomous|logistics|ev\b|vehicle)\b/i, "Mobility"],
+  [/\b(legaltech|legal)\b/i, "Legal"],
+  [/\b(biotech|therapeutic|genomic)\b/i, "Biotech"],
+  [/\b(healthtech|healthcare|health|clinic|medical)\b/i, "Health"],
+  [/\b(proptech|real estate)\b/i, "Proptech"],
+  [/\b(edtech|education|learning)\b/i, "Edtech"],
+  [/\b(marketplace)\b/i, "Marketplaces"],
+  [/\b(commerce|ecommerce|retail)\b/i, "Commerce"],
+  [/\b(consumer app|consumer)\b/i, "Consumer"],
+  [/\b(industrial|robotics|hardware|deep tech)\b/i, "Industrial & Deep Tech"],
+  [/\b(enterprise|saas|b2b)\b/i, "Enterprise Software"],
+  [/\b(foundation model|frontier model)\b/i, "AI Frontier"],
+  [/\b(artificial intelligence|\bai\b|machine learning)\b/i, "Applied AI"],
+];
+
+type PitchClues = {
+  company?: string;
+  founder?: string;
+  email?: string;
+  country?: string;
+  theme?: string;
+  stage?: string;
+  website?: string;
+};
+
+const CLUE_LABEL: Record<keyof PitchClues, string> = {
+  company: "company",
+  founder: "your name",
+  email: "email",
+  country: "country",
+  theme: "theme",
+  stage: "stage",
+  website: "website",
+};
+
+function joinWords(items: string[]) {
+  if (items.length <= 1) return items[0] || "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function describeClues(clues: Partial<Record<keyof PitchClues, "pitch" | "deck">>) {
+  const line = (source: "pitch" | "deck") =>
+    (Object.entries(clues) as Array<[keyof PitchClues, "pitch" | "deck" | undefined]>)
+      .filter(([, from]) => from === source)
+      .map(([key]) => CLUE_LABEL[key]);
+  const parts = [
+    line("deck").length ? `${joinWords(line("deck"))} from the deck` : "",
+    line("pitch").length ? `${joinWords(line("pitch"))} from the pitch` : "",
+  ].filter(Boolean);
+  return parts.length ? `Filled ${joinWords(parts)}.` : "";
+}
+
+function tidyName(raw: string) {
+  const stop = new Set(["the", "a", "an", "our", "we", "my", "from", "at", "and", "with", "building", "based", "currently", "here", "excited", "working", "raising", "looking", "going", "trying", "just", "really", "actually", "founder", "startup", "company"]);
+  const words = raw.trim().split(/\s+/).slice(0, 3).filter(Boolean);
+  if (!words.length || words.some((word) => stop.has(word.toLowerCase().replace(/[^a-z]/g, "")))) return "";
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+}
+
+function tidyCompany(raw: string) {
+  const cleaned = raw.replace(/[.,;:]+$/g, "").trim();
+  const words = cleaned.split(/\s+/).slice(0, 4);
+  if (words.length < 1 || words.length > 4) return "";
+  if (words.some((word) => /^(the|a|an|our|this|that|pitch|deck|startup|company)$/i.test(word))) return "";
+  if (cleaned.length < 2 || cleaned.length > 42) return "";
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+}
+
+function prettyFileName(name: string) {
+  const ext = (name.split(".").pop() || "").toUpperCase();
+  const base = name
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { base: base || name, ext };
+}
+
+function companyFromFilename(name: string) {
+  const base = name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+  const cleaned = base
+    .replace(/\b(pitch|deck|final|draft|slides?|investor|seed|preseed|pre seed|series|confidential|copy|version|startup|presentation|pdf|pptx?|docx?)\b/gi, " ")
+    .replace(/\bv\d+\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return tidyCompany(cleaned);
+}
+
+function readPitchClues(text: string): PitchClues {
+  const clues: PitchClues = {};
+  const founder =
+    text.match(/my name is\s+([a-z][a-z.'’-]+(?:\s+[a-z][a-z.'’-]+){0,2})/i)?.[1]
+    || text.match(/(?:i'm|i am)\s+([a-z][a-z.'’-]+(?:\s+[a-z][a-z.'’-]+){0,2})/i)?.[1]
+    || text.match(/([a-z][a-z.'’-]+(?:\s+[a-z][a-z.'’-]+)?)\s*,?\s*(?:the\s+)?(?:co-?founder|founder|ceo)\b/i)?.[1];
+  if (founder) {
+    const name = tidyName(founder);
+    if (name) clues.founder = name;
+  }
+  const company =
+    text.match(/(?:co-?founder|founder|ceo)\s+(?:of|at)\s+([a-z0-9][\w&.'’-]*(?:\s+[a-z0-9][\w&.'’-]*){0,3})/i)?.[1]
+    || text.match(/(?:company|startup)\s+(?:is\s+)?(?:called\s+)?([a-z0-9][\w&.'’-]*(?:\s+[a-z0-9][\w&.'’-]*){0,3})/i)?.[1]
+    || text.match(/(?:we(?:'re| are) called|called)\s+([a-z0-9][\w&.'’-]*(?:\s+[a-z0-9][\w&.'’-]*){0,3})/i)?.[1];
+  if (company) {
+    const name = tidyCompany(company);
+    if (name) clues.company = name;
+  }
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  if (email && !/example\.com|noreply/i.test(email)) clues.email = email.toLowerCase();
+  const site = text.match(/https?:\/\/[^\s)]+|www\.[^\s)]+/i)?.[0]?.replace(/[.,]+$/, "");
+  if (site) clues.website = site.startsWith("http") ? site : `https://${site}`;
+  const country = [...COUNTRY_NAMES].sort((a, b) => b.length - a.length).find((name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text));
+  if (country) clues.country = COUNTRY_CANON[country] || country;
+  if (/\bpre[-\s]?seed\b/i.test(text)) clues.stage = "PreSeed";
+  else if (/\bseed\b/i.test(text)) clues.stage = "Seed";
+  else if (/\b(working prototype|prototype|mvp|beta)\b/i.test(text)) clues.stage = "WorkingPrototype";
+  else if (/\b(idea stage|just an idea)\b/i.test(text)) clues.stage = "Idea";
+  const theme = THEME_RULES.find(([rule]) => rule.test(text));
+  if (theme) clues.theme = theme[1];
+  return clues;
+}
+
+async function textFromDeck(file: File) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".txt") || name.endsWith(".md") || file.type.startsWith("text/")) {
+    return (await file.text()).slice(0, 20000);
+  }
+  if (!name.endsWith(".pdf") && file.type !== "application/pdf") return "";
+  try {
+    const pdfjs = await import(/* @vite-ignore */ "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.min.mjs") as {
+      GlobalWorkerOptions: { workerSrc: string };
+      getDocument: (src: { data: Uint8Array }) => { promise: Promise<{ numPages: number; getPage: (n: number) => Promise<{ getTextContent: () => Promise<{ items: Array<{ str?: string }> }> }> }> };
+    };
+    pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.8.69/build/pdf.worker.min.mjs";
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    let out = "";
+    for (let i = 1; i <= Math.min(doc.numPages, 5); i += 1) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      out += `${content.items.map((item) => item.str || "").join(" ")}\n`;
+      if (out.length > 16000) break;
+    }
+    return out;
+  } catch {
+    return "";
+  }
 }
 
 /* ── Page ──────────────────────────────────────────────────────────────────── */
@@ -1280,6 +1907,10 @@ const PitchUs = () => {
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [videoUrl, setVideoUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [deckReading, setDeckReading] = useState(false);
+  const [deckOver, setDeckOver] = useState(false);
+  const [clues, setClues] = useState<Partial<Record<keyof PitchClues, "pitch" | "deck">>>({});
+  const fieldsRef = useRef({ companyName: "", founderName: "", founderEmail: "", country: "", theme: "", stage: "", websiteUrl: "" });
   const [explainerFile, setExplainerFile] = useState<File | null>(null);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [agreed, setAgreed] = useState(false);
@@ -1390,6 +2021,52 @@ const PitchUs = () => {
     return () => clearInterval(timer);
   }, [phase, pitchId, accessToken, pollStatus, applyEngineData, outputReady]);
 
+  fieldsRef.current = { companyName, founderName, founderEmail, country, theme, stage, websiteUrl };
+
+  const applyClues = (partial: PitchClues, source: "pitch" | "deck") => {
+    const current = { ...fieldsRef.current };
+    const added: Partial<Record<keyof PitchClues, "pitch" | "deck">> = {};
+    if (!current.companyName.trim() && partial.company) {
+      current.companyName = partial.company;
+      setCompanyName(partial.company);
+      added.company = source;
+    }
+    if (!current.founderName.trim() && partial.founder) {
+      current.founderName = partial.founder;
+      setFounderName(partial.founder);
+      added.founder = source;
+    }
+    if (!current.founderEmail.trim() && partial.email) {
+      current.founderEmail = partial.email;
+      setFounderEmail(partial.email);
+      added.email = source;
+    }
+    if (!current.country.trim() && partial.country) {
+      current.country = partial.country;
+      setCountry(partial.country);
+      added.country = source;
+    }
+    if (!current.theme.trim() && partial.theme) {
+      current.theme = partial.theme;
+      setTheme(partial.theme);
+      added.theme = source;
+    }
+    if (!current.stage.trim() && partial.stage) {
+      current.stage = partial.stage;
+      setStage(partial.stage);
+      added.stage = source;
+    }
+    if (!current.websiteUrl.trim() && partial.website) {
+      current.websiteUrl = partial.website;
+      setWebsiteUrl(partial.website);
+      added.website = source;
+    }
+    fieldsRef.current = current;
+    if (Object.keys(added).length) setClues((prev) => ({ ...prev, ...added }));
+  };
+
+  const clearClue = (key: keyof PitchClues) => setClues((current) => ({ ...current, [key]: undefined }));
+
   const handleFile = (next: File | null) => {
     if (!next) return;
     if (next.size > 50 * 1024 * 1024) {
@@ -1397,6 +2074,13 @@ const PitchUs = () => {
       return;
     }
     setFile(next);
+    setDeckReading(true);
+    const fromName = companyFromFilename(next.name);
+    void textFromDeck(next).then((text) => {
+      const partial = readPitchClues(text);
+      if (!partial.company && fromName) partial.company = fromName;
+      applyClues(partial, "deck");
+    }).finally(() => setDeckReading(false));
   };
 
   const handleExplainer = (next: File | null) => {
@@ -1413,7 +2097,8 @@ const PitchUs = () => {
   };
 
   const invokeEngine = useCallback(async (payload: Record<string, unknown>, id: string, token: string) => {
-    const { data, error } = await supabase.functions.invoke("review-pitch", { body: payload });
+    // This app uses the A2A review. The previous app still calls review-pitch.
+    const { data, error } = await supabase.functions.invoke("review-pitch-a2a", { body: payload });
 
     if (data?.status) {
       applyEngineData(data);
@@ -1639,133 +2324,178 @@ const PitchUs = () => {
       <div className="relative z-10 mx-auto max-w-5xl px-4 pb-20 pt-10 md:pt-14">
         {phase === "intake" && (
           <form onSubmit={submitPitch} className="pitch-intake mx-auto max-w-5xl animate-slide-up">
-            <header className="mb-10 flex items-end justify-between gap-6">
-              <div>
-                <div className="mb-4 flex items-center gap-3">
-                  <ReviewerCore live size={28} />
-                  <p className="text-xs uppercase tracking-[0.22em] text-primary">Agent ready</p>
-                </div>
+            <header className="mb-10 flex flex-col items-start gap-4 md:flex-row md:items-end md:justify-between md:gap-6">
+              <div className="min-w-0">
                 <h1 className="text-4xl font-medium tracking-tight text-white md:text-5xl">AI-pitch review · Beta</h1>
                 <p className="mt-3 max-w-xl text-base text-white/55">
                   {isRoundTwo
                     ? "Bring what changed. The next pass weighs it against the last one."
-                    : "Tell us about your startup. Record a live elevator pitch, up to 3 minutes, OR upload a pitch deck and other info. An AI agent gives an educational pitch review: a high-level look at strengths and areas to help improve. This is not a funding decision, and it creates no financial commitment."}
+                    : "A live pitch and a deck, or either one. A site, a video link, or an explainer can come along too. An educational review follows: strengths, and where to improve. Not a funding decision, and no commitment of capital."}
                 </p>
                 <p className="mt-4 max-w-xl text-xs leading-relaxed text-white/40">{DISCLAIMER}</p>
               </div>
-              <button type="button" onClick={() => go("/super-league")} className="text-sm text-white/50 hover:text-white">
+              <button type="button" onClick={() => go("/super-league")} className="shrink-0 text-sm text-white/50 hover:text-white">
                 Super League
               </button>
             </header>
 
-            <div className="grid items-start gap-12 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
-              <section>
-                <p className="mb-2 text-xs uppercase tracking-[0.18em] text-white/35">You</p>
-                <label className="block">
-                  <span className="sr-only">Company</span>
-                  <input className={fieldClass} value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="Company" required />
-                </label>
-                <label className="block">
-                  <span className="sr-only">Your name</span>
-                  <input className={fieldClass} value={founderName} onChange={(e) => setFounderName(e.target.value)} placeholder="Your name" required />
-                </label>
-                <label className="block">
-                  <span className="sr-only">Email</span>
-                  <input type="email" className={fieldClass} value={founderEmail} onChange={(e) => setFounderEmail(e.target.value)} placeholder="Email" required />
-                </label>
-                <label className="block">
-                  <span className="sr-only">Country</span>
-                  <input className={fieldClass} value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Country" required />
-                </label>
-                <label className="relative block">
-                  <span className="sr-only">Theme</span>
-                  <select
-                    className={cn(fieldClass, "appearance-none pr-6", !theme && "text-white/35")}
-                    value={theme}
-                    onChange={(e) => setTheme(e.target.value)}
-                    required
-                  >
-                    <option value="" disabled>Theme</option>
-                    {THEMES.map((item) => (
-                      <option key={item} value={item} className="bg-black text-white">{item}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
-                </label>
-                <label className="relative block">
-                  <span className="sr-only">Stage</span>
-                  <select
-                    className={cn(fieldClass, "appearance-none pr-6", !stage && "text-white/35")}
-                    value={stage}
-                    onChange={(e) => setStage(e.target.value)}
-                    required
-                  >
-                    <option value="" disabled>Stage</option>
-                    {STAGES.map((item) => (
-                      <option key={item.value} value={item.value} className="bg-black text-white">{item.label}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
-                </label>
-              </section>
-
-              <section>
-                <div className="mb-1 flex items-baseline justify-between">
-                  <p className="text-xs uppercase tracking-[0.18em] text-white/35">Sources</p>
-                  <p className="text-xs text-white/35">
-                    {[file, explainerFile, videoUrl.trim(), websiteUrl.trim(), liveTranscript.trim()].filter(Boolean).length || "None"} ready
-                  </p>
+            <div className="border border-white/15">
+              <div className="relative grid md:grid-cols-2">
+                <div className={cn("border-b border-white/15 transition-colors md:border-b-0 md:border-r", liveTranscript ? "bg-primary/[0.04]" : "hover:bg-white/[0.03]")}>
+                  <LivePitchRecorder
+                    transcript={liveTranscript}
+                    onTranscript={(text) => {
+                      setLiveTranscript(text);
+                      if (text.trim()) applyClues(readPitchClues(text), "pitch");
+                    }}
+                    founderName={founderName}
+                    companyName={companyName}
+                  />
                 </div>
-                <LivePitchRecorder transcript={liveTranscript} onTranscript={setLiveTranscript} founderName={founderName} companyName={companyName} />
-                <label className="pitch-row cursor-pointer">
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", file ? "bg-primary" : "bg-white/25")} />
+                <label
+                  className={cn("flex cursor-pointer items-center gap-4 px-5 py-4 transition-colors md:px-6 md:py-5 md:pl-14", deckOver && "bg-primary/10", file ? "bg-primary/[0.04]" : "hover:bg-white/[0.03]")}
+                  onDragOver={(e) => { e.preventDefault(); setDeckOver(true); }}
+                  onDragLeave={() => setDeckOver(false)}
+                  onDrop={(e) => { e.preventDefault(); setDeckOver(false); handleFile(e.dataTransfer.files?.[0] ?? null); }}
+                >
                   <span className="min-w-0 flex-1">
-                    <span className="block text-[15px] text-white">Attach pitch deck</span>
-                    <span className="block truncate text-xs text-white/40">{file ? file.name : "PDF, slides, or a doc"}</span>
+                    <span className="block text-[10px] uppercase tracking-[0.22em] text-white/35">02</span>
+                    <span className="mt-1 block text-xl font-medium tracking-tight text-white">Upload deck</span>
+                    <span className="mt-1 block truncate text-sm text-white/45">
+                      {file ? prettyFileName(file.name).base : deckReading ? "Reading the deck" : "Drop a PDF or slides"}
+                    </span>
                   </span>
-                  {file ? (
-                    <button type="button" className="text-sm text-white/45 hover:text-white" onClick={(e) => { e.preventDefault(); setFile(null); }}>Remove</button>
-                  ) : (
-                    <span className="pitch-row-action text-sm text-white/45">Add</span>
+                  {file && (
+                    <span className="shrink-0 text-[10px] uppercase tracking-[0.16em] text-white/35">{prettyFileName(file.name).ext}</span>
                   )}
-                  <input type="file" className="hidden" accept=".pdf,.ppt,.pptx,.doc,.docx,.png,.jpg,.jpeg,.webp,.txt,.md" onChange={(e) => handleFile(e.target.files?.[0] ?? null)} />
-                </label>
-                <label className="pitch-row cursor-pointer">
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", explainerFile ? "bg-primary" : "bg-white/25")} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[15px] text-white">Attach explainer video</span>
-                    <span className="block truncate text-xs text-white/40">{explainerFile ? explainerFile.name : "A recorded video"}</span>
+                  <span className="flex shrink-0 items-center gap-4">
+                    {file && (
+                      <button type="button" className="text-sm text-white/40 hover:text-white" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFile(null); setDeckReading(false); }}>
+                        Remove
+                      </button>
+                    )}
+                    <span className="text-sm text-primary">{file ? "Replace" : "Upload"}</span>
                   </span>
-                  {explainerFile ? (
-                    <button type="button" className="text-sm text-white/45 hover:text-white" onClick={(e) => { e.preventDefault(); setExplainerFile(null); }}>Remove</button>
-                  ) : (
-                    <span className="pitch-row-action text-sm text-white/45">Add</span>
-                  )}
-                  <input type="file" className="hidden" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" onChange={(e) => handleExplainer(e.target.files?.[0] ?? null)} />
+                  <input id="pitch-deck" type="file" className="hidden" accept=".pdf,.ppt,.pptx,.doc,.docx,.png,.jpg,.jpeg,.webp,.txt,.md" onChange={(e) => { handleFile(e.target.files?.[0] ?? null); e.target.value = ""; }} />
                 </label>
-                <label className="pitch-row">
-                  <Link2 className="h-3.5 w-3.5 shrink-0 text-white/35" />
-                  <input className="w-full bg-transparent text-[15px] text-white placeholder:text-white/35 focus:outline-none" value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="Video link" />
-                </label>
-                <label className="pitch-row">
-                  <Link2 className="h-3.5 w-3.5 shrink-0 text-white/35" />
-                  <input className="w-full bg-transparent text-[15px] text-white placeholder:text-white/35 focus:outline-none" value={websiteUrl} onChange={(e) => setWebsiteUrl(e.target.value)} placeholder="Website" />
-                </label>
-              </section>
+                <div className="pointer-events-none absolute left-1/2 top-1/2 hidden h-9 w-9 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/20 bg-black text-center text-[8px] uppercase leading-tight tracking-[0.12em] text-white/55 md:grid">
+                  and<br />or
+                </div>
+              </div>
+              <div className="grid border-t border-white/15 md:grid-cols-3">
+              <label className="flex min-w-0 items-center gap-3 border-b border-white/15 px-5 py-4 md:border-b-0 md:border-r">
+                <span className="sr-only">Website</span>
+                <input className="w-full bg-transparent text-[15px] text-white placeholder:text-white/40 focus:outline-none" value={websiteUrl} onChange={(e) => { setWebsiteUrl(e.target.value); clearClue("website"); }} placeholder="Website" />
+              </label>
+              <label className="flex min-w-0 items-center gap-3 border-b border-white/15 px-5 py-4 md:border-b-0 md:border-r">
+                <span className="sr-only">Video link</span>
+                <input className="w-full bg-transparent text-[15px] text-white placeholder:text-white/40 focus:outline-none" value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="Video link" />
+              </label>
+              <label className="flex min-w-0 cursor-pointer items-center gap-3 px-5 py-4">
+                <span className="min-w-0 flex-1 truncate text-[15px] text-white/80">{explainerFile ? explainerFile.name : "Explainer video"}</span>
+                {explainerFile ? (
+                  <button type="button" className="shrink-0 text-sm text-white/45 hover:text-white" onClick={(e) => { e.preventDefault(); setExplainerFile(null); }}>Remove</button>
+                ) : (
+                  <span className="shrink-0 text-sm text-primary">Add</span>
+                )}
+                <input type="file" className="hidden" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" onChange={(e) => { handleExplainer(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+              </label>
+              </div>
             </div>
 
-            <div className="mt-10 flex flex-col gap-5 border-t border-white/10 pt-6">
-              <CritiqueDial value={critiqueLevel} onChange={setCritiqueLevel} />
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <label className="flex max-w-xl items-start gap-3 text-sm leading-relaxed text-white/55">
-                  <input
-                    type="checkbox"
-                    className="mt-1 accent-[hsl(192_92%_64%)]"
-                    checked={agreed}
-                    onChange={(e) => setAgreed(e.target.checked)}
-                  />
-                  <span>I understand this is for educational purposes only. It is not investment advice, not an offer to invest, and not a commitment of capital.</span>
+            {(file || liveTranscript.trim() || explainerFile || videoUrl.trim() || websiteUrl.trim()) && (
+            <div className="mt-10 animate-slide-up">
+              <p className="text-xs uppercase tracking-[0.18em] text-white/35">Details</p>
+              <p className="mt-2 max-w-xl text-sm text-white/50">
+                {(() => {
+                  const filled = describeClues(clues);
+                  const missing = [
+                    !companyName.trim() && "company",
+                    !founderName.trim() && "your name",
+                    !founderEmail.trim() && "email",
+                    !country.trim() && "country",
+                    !theme && "theme",
+                    !stage && "stage",
+                  ].filter(Boolean);
+                  return [filled, missing.length ? `Still needs ${joinWords(missing as string[])}.` : "Change anything that looks off."].filter(Boolean).join(" ");
+                })()}
+              </p>
+              <div className="mt-4 grid gap-x-12 md:grid-cols-2">
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Company</span>
+                  <input className={fieldClass} value={companyName} onChange={(e) => { setCompanyName(e.target.value); clearClue("company"); }} placeholder="Company" required />
+                  {clues.company && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.company === "deck" ? "Deck" : "Pitch"}</span>}
                 </label>
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Your name</span>
+                  <input className={fieldClass} value={founderName} onChange={(e) => { setFounderName(e.target.value); clearClue("founder"); }} placeholder="Your name" required />
+                  {clues.founder && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.founder === "deck" ? "Deck" : "Pitch"}</span>}
+                </label>
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Email</span>
+                  <input type="email" className={fieldClass} value={founderEmail} onChange={(e) => { setFounderEmail(e.target.value); clearClue("email"); }} placeholder="Email" required />
+                  {clues.email && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.email === "deck" ? "Deck" : "Pitch"}</span>}
+                </label>
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Country</span>
+                  <input className={fieldClass} value={country} onChange={(e) => { setCountry(e.target.value); clearClue("country"); }} placeholder="Country" required />
+                  {clues.country && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.country === "deck" ? "Deck" : "Pitch"}</span>}
+                </label>
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Theme</span>
+                  <span className="relative min-w-0 flex-1">
+                    <select
+                      className={cn(fieldClass, "appearance-none pr-6", !theme && "text-white/35")}
+                      value={theme}
+                      onChange={(e) => { setTheme(e.target.value); clearClue("theme"); }}
+                      required
+                    >
+                      <option value="" disabled>Theme</option>
+                      {THEMES.map((item) => (
+                        <option key={item} value={item} className="bg-black text-white">{item}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
+                  </span>
+                  {clues.theme && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.theme === "deck" ? "Deck" : "Pitch"}</span>}
+                </label>
+                <label className="flex items-end gap-3">
+                  <span className="sr-only">Stage</span>
+                  <span className="relative min-w-0 flex-1">
+                    <select
+                      className={cn(fieldClass, "appearance-none pr-6", !stage && "text-white/35")}
+                      value={stage}
+                      onChange={(e) => { setStage(e.target.value); clearClue("stage"); }}
+                      required
+                    >
+                      <option value="" disabled>Stage</option>
+                      {STAGES.map((item) => (
+                        <option key={item.value} value={item.value} className="bg-black text-white">{item.label}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-0 top-1/2 h-4 w-4 -translate-y-1/2 text-white/35" />
+                  </span>
+                  {clues.stage && <span className="mb-3 shrink-0 text-[10px] uppercase tracking-[0.14em] text-primary/80">{clues.stage === "deck" ? "Deck" : "Pitch"}</span>}
+                </label>
+              </div>
+
+            <div className="mt-10 border-t border-white/10 pt-6">
+              <CritiqueDial value={critiqueLevel} onChange={setCritiqueLevel} />
+            </div>
+            </div>
+            )}
+
+            <div className="mt-10 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <label className="flex max-w-xl items-start gap-3 text-sm leading-relaxed text-white/55">
+                <input
+                  type="checkbox"
+                  className="mt-1 accent-[hsl(192_92%_64%)]"
+                  checked={agreed}
+                  onChange={(e) => setAgreed(e.target.checked)}
+                />
+                <span>I understand this is for educational purposes only. It is not investment advice, not an offer to invest, and not a commitment of capital.</span>
+              </label>
+              {(file || liveTranscript.trim() || explainerFile || videoUrl.trim() || websiteUrl.trim()) && (
                 <Button type="submit" disabled={submitting} className="pitch-launch gap-2 text-sm hover:brightness-110">
                   {submitting ? (
                     <>
@@ -1777,7 +2507,7 @@ const PitchUs = () => {
                     </>
                   )}
                 </Button>
-              </div>
+              )}
             </div>
           </form>
         )}
@@ -1814,6 +2544,8 @@ const PitchUs = () => {
                 artifacts={artifacts}
                 outputReady={outputReady}
                 onReadyToReveal={revealResult}
+                deckAttached={!!file}
+                spoken={liveTranscript}
               />
             )}
 
@@ -1906,7 +2638,7 @@ const PitchUs = () => {
                     )}
                     {(artifacts.evidence || []).length > 0 && (
                       <ResultFold title="Evidence" summary={evidenceSummary(artifacts.evidence || [])}>
-                        <EvidencePanel evidence={artifacts.evidence || []} />
+                        <EvidencePanel evidence={artifacts.evidence || []} numbers={artifacts.numbers} deckNote={artifacts.deck_note} deckAttached={!!file} spoken={liveTranscript} />
                       </ResultFold>
                     )}
                 </div>
